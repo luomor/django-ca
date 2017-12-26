@@ -16,6 +16,7 @@
 import os
 
 import idna
+
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
@@ -23,16 +24,19 @@ from cryptography.hazmat.primitives.asymmetric import dsa
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import Encoding
 from cryptography.hazmat.primitives.serialization import PrivateFormat
+from cryptography.x509 import TLSFeature
 from cryptography.x509.oid import AuthorityInformationAccessOID
 from cryptography.x509.oid import ExtensionOID
 
 from django.db import models
+from django.utils import six
 from django.utils.encoding import force_bytes
 from django.utils.encoding import force_text
 
 from . import ca_settings
 from .utils import EXTENDED_KEY_USAGE_MAPPING
 from .utils import KEY_USAGE_MAPPING
+from .utils import TLS_FEATURE_MAPPING
 from .utils import get_cert_builder
 from .utils import is_power2
 from .utils import parse_general_name
@@ -43,7 +47,7 @@ class CertificateManagerMixin(object):
     def get_common_extensions(self, issuer_url=None, crl_url=None, ocsp_url=None):
         extensions = []
         if crl_url:
-            if isinstance(crl_url, str):
+            if isinstance(crl_url, six.string_types):
                 crl_url = [url.strip() for url in crl_url.split()]
             urls = [x509.UniformResourceIdentifier(force_text(c)) for c in crl_url]
             dps = [x509.DistributionPoint(full_name=[c], relative_name=None, crl_issuer=None, reasons=None)
@@ -145,7 +149,7 @@ class CertificateAuthorityManager(CertificateManagerMixin, models.Manager):
             excluded = []
             permitted = []
             for constraint in name_constraints:
-                typ, name = constraint.split(';', 1)
+                typ, name = constraint.split(',', 1)
                 parsed = parse_general_name(name)
                 if typ == 'permitted':
                     permitted.append(parsed)
@@ -186,7 +190,8 @@ class CertificateAuthorityManager(CertificateManagerMixin, models.Manager):
 
 class CertificateManager(CertificateManagerMixin, models.Manager):
     def sign_cert(self, ca, csr, expires, algorithm, subject=None, cn_in_san=True, csr_format=Encoding.PEM,
-                  subjectAltName=None, keyUsage=None, extendedKeyUsage=None, password=None):
+                  subjectAltName=None, keyUsage=None, extendedKeyUsage=None, tls_features=None,
+                  password=None):
         """Create a signed certificate from a CSR.
 
         X509 extensions (`key_usage`, `ext_key_usage`) may either be None (in which case they are
@@ -203,7 +208,7 @@ class CertificateManager(CertificateManagerMixin, models.Manager):
         csr : str
             A valid CSR. The format is given by the ``csr_format`` parameter.
         expires : int
-            When the certificate should expire (passed to :py:func:`get_cert_builder`).
+            When the certificate should expire (passed to :py:func:`~django_ca.utils.get_cert_builder`).
         algorithm : {'sha512', 'sha256', ...}
             Algorithm used to sign the certificate. The default is the CA_DIGEST_ALGORITHM setting.
         subject : dict, optional
@@ -226,6 +231,8 @@ class CertificateManager(CertificateManagerMixin, models.Manager):
             Value for the `keyUsage` X509 extension. See description for format details.
         extendedKeyUsage : tuple or None
             Value for the `extendedKeyUsage` X509 extension. See description for format details.
+        tls_features : tuple
+            Value for the `TLS Feature` X509 extension. See description for format details.
         password : bytes, optional
             Password used to load the private key of the certificate authority. If not passed, the private key
             is assumed to be unencrypted.
@@ -301,6 +308,11 @@ class CertificateManager(CertificateManagerMixin, models.Manager):
             critical, usages = extendedKeyUsage
             usages = [EXTENDED_KEY_USAGE_MAPPING[u] for u in usages.split(',')]
             builder = builder.add_extension(x509.ExtendedKeyUsage(usages), critical=critical)
+
+        if tls_features:
+            critical, features = tls_features
+            features = [TLS_FEATURE_MAPPING[f] for f in features.split(',')]
+            builder = builder.add_extension(TLSFeature(features), critical=critical)
 
         if ca.issuer_alt_name:
             builder = builder.add_extension(x509.IssuerAlternativeName(

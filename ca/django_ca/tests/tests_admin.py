@@ -19,19 +19,26 @@ from datetime import timedelta
 
 from cryptography.hazmat.primitives.serialization import Encoding
 
+from django.contrib.auth.models import Permission
 from django.contrib.auth.models import User
 from django.contrib.staticfiles.templatetags.staticfiles import static
-from django.core.urlresolvers import reverse
 from django.test import Client
 from django.utils import timezone
 from django.utils.encoding import force_text
+from django.utils.six.moves.urllib.parse import quote
 
 from ..models import Certificate
 from ..models import CertificateAuthority
+from ..models import Watcher
 from ..utils import SUBJECT_FIELDS
 from .base import DjangoCAWithCertTestCase
 from .base import DjangoCAWithCSRTestCase
 from .base import override_tmpcadir
+
+try:
+    from django.urls import reverse
+except ImportError:  # Django 1.8 import
+    from django.core.urlresolvers import reverse
 
 
 class AdminTestMixin(object):
@@ -54,9 +61,9 @@ class AdminTestMixin(object):
 
         return reverse('admin:django_ca_certificate_change', args=(pk, ))
 
-    def assertRequiresLogin(self, response):
-        expected = '%s?next=%s' % (reverse('admin:login'), response.wsgi_request.path)
-        self.assertRedirects(response, expected)
+    def assertRequiresLogin(self, response, **kwargs):
+        expected = '%s?next=%s' % (reverse('admin:login'), quote(response.wsgi_request.get_full_path()))
+        self.assertRedirects(response, expected, **kwargs)
 
 
 class ChangelistTestCase(AdminTestMixin, DjangoCAWithCertTestCase):
@@ -70,7 +77,7 @@ class ChangelistTestCase(AdminTestMixin, DjangoCAWithCertTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertCerts(response, [self.cert])
 
-        self.assertCSS(response, 'django_ca/admin/css/monospace.css')
+        self.assertCSS(response, 'django_ca/admin/css/base.css')
         self.assertCSS(response, 'django_ca/admin/css/certificateadmin.css')
 
     def test_status(self):
@@ -108,19 +115,56 @@ class RevokeActionTestCase(AdminTestMixin, DjangoCAWithCertTestCase):
     """Test the "revoke" action in the changelist."""
 
     def test_basic(self):
+        self.assertNotRevoked(self.cert)
+
         data = {
             'action': 'revoke', '_selected_action': [self.cert.pk],
         }
         response = self.client.post(self.changelist_url, data)
         self.assertRedirects(response, self.changelist_url)
-
-        cert = Certificate.objects.get(serial=self.cert.serial)
-        self.assertTrue(cert.revoked)
-        self.assertIsNone(cert.revoked_reason)
+        self.assertRevoked(self.cert)
 
         # revoking revoked certs does nothing:
         response = self.client.post(self.changelist_url, data)
         self.assertRedirects(response, self.changelist_url)
+        self.assertRevoked(self.cert)
+
+    def test_permissions(self):
+        data = {
+            'action': 'revoke', '_selected_action': [self.cert.pk],
+        }
+
+        # make an anonymous request
+        client = Client()
+        response = client.post(self.changelist_url, data)
+        self.assertRequiresLogin(response)
+
+        # cert is not revoked
+        cert = Certificate.objects.get(serial=self.cert.serial)
+        self.assertFalse(cert.revoked)
+        self.assertIsNone(cert.revoked_reason)
+
+        # test with a logged in user, but not staff
+        user = User.objects.create_user(username='staff', password='password', email='staff@example.com')
+        self.assertTrue(client.login(username='staff', password='password'))
+
+        response = client.post(self.changelist_url, data)
+        self.assertRequiresLogin(response)
+        self.assertNotRevoked(self.cert)
+
+        # make the user "staff"
+        user.is_staff = True
+        user.save()
+        self.assertTrue(User.objects.get(username='staff').is_staff)  # really is staff, right?
+        response = client.post(self.changelist_url, data)
+        self.assertEqual(response.status_code, 403)
+        self.assertNotRevoked(self.cert)
+
+        # now give appropriate permission
+        p = Permission.objects.get(codename='change_certificate')
+        user.user_permissions.add(p)
+        response = client.post(self.changelist_url, data)
+        self.assertRevoked(self.cert)
 
 
 class ChangeTestCase(AdminTestMixin, DjangoCAWithCertTestCase):
@@ -131,7 +175,7 @@ class ChangeTestCase(AdminTestMixin, DjangoCAWithCertTestCase):
         templates = [t.name for t in response.templates]
         self.assertIn('django_ca/admin/change_form.html', templates)
         self.assertIn('admin/change_form.html', templates)
-        self.assertCSS(response, 'django_ca/admin/css/monospace.css')
+        self.assertCSS(response, 'django_ca/admin/css/base.css')
         self.assertCSS(response, 'django_ca/admin/css/certificateadmin.css')
 
     def test_revoked(self):
@@ -145,8 +189,20 @@ class ChangeTestCase(AdminTestMixin, DjangoCAWithCertTestCase):
         templates = [t.name for t in response.templates]
         self.assertIn('django_ca/admin/change_form.html', templates)
         self.assertIn('admin/change_form.html', templates)
-        self.assertCSS(response, 'django_ca/admin/css/monospace.css')
+        self.assertCSS(response, 'django_ca/admin/css/base.css')
         self.assertCSS(response, 'django_ca/admin/css/certificateadmin.css')
+
+    def test_change_watchers(self):
+        cert = Certificate.objects.get(serial=self.cert.serial)
+        watcher = Watcher.objects.create(name='User', mail='user@example.com')
+
+        response = self.client.post(self.change_url(), data={
+            'watchers': [watcher.pk],
+        })
+
+        self.assertEqual(response.status_code, 302)
+        self.assertRedirects(response, self.changelist_url)
+        self.assertEqual(list(cert.watchers.all()), [watcher])
 
 
 class AddTestCase(AdminTestMixin, DjangoCAWithCSRTestCase):
@@ -156,7 +212,7 @@ class AddTestCase(AdminTestMixin, DjangoCAWithCSRTestCase):
         templates = [t.name for t in response.templates]
         self.assertIn('django_ca/admin/change_form.html', templates)
         self.assertIn('admin/change_form.html', templates)
-        self.assertCSS(response, 'django_ca/admin/css/monospace.css')
+        self.assertCSS(response, 'django_ca/admin/css/base.css')
         self.assertCSS(response, 'django_ca/admin/css/certificateadmin.css')
 
     def test_add(self):
@@ -174,6 +230,8 @@ class AddTestCase(AdminTestMixin, DjangoCAWithCSRTestCase):
             'keyUsage_1': True,
             'extendedKeyUsage_0': ['clientAuth', 'serverAuth', ],
             'extendedKeyUsage_1': False,
+            'tlsFeature_0': ['OCSPMustStaple', 'MultipleCertStatusRequest'],
+            'tlsFeature_1': False,
         })
         self.assertRedirects(response, self.changelist_url)
 
@@ -181,12 +239,18 @@ class AddTestCase(AdminTestMixin, DjangoCAWithCSRTestCase):
         self.assertSubject(cert.x509, {'C': 'US', 'CN': cn})
         self.assertIssuer(self.ca, cert)
         self.assertAuthorityKeyIdentifier(self.ca, cert)
-        self.assertEqual(cert.subjectAltName(), 'DNS:%s' % cn)
-        self.assertEqual(cert.basicConstraints(), 'critical,CA:FALSE')
-        self.assertEqual(cert.keyUsage(), 'critical,digitalSignature,keyAgreement')
-        self.assertEqual(cert.extendedKeyUsage(), 'clientAuth,serverAuth')
+        self.assertEqual(cert.subjectAltName(), (False, ['DNS:%s' % cn]))
+        self.assertEqual(cert.basicConstraints(), (True, 'CA:FALSE'))
+        self.assertEqual(cert.keyUsage(), (True, ['digitalSignature', 'keyAgreement']))
+        self.assertEqual(cert.extendedKeyUsage(), (False, ['clientAuth', 'serverAuth']))
+        self.assertEqual(cert.TLSFeature(),
+                         (False, ['OCSP Must-Staple', 'Multiple Certificate Status Request']))
         self.assertEqual(cert.ca, self.ca)
         self.assertEqual(cert.csr, self.csr_pem)
+
+        # Test that we can view the certificate
+        response = self.client.get(self.change_url(cert.pk))
+        self.assertEqual(response.status_code, 200)
 
     def test_add_no_key_usage(self):
         cn = 'test-add2.example.com'
@@ -212,12 +276,17 @@ class AddTestCase(AdminTestMixin, DjangoCAWithCSRTestCase):
         self.assertSubject(cert.x509, {'C': 'US', 'CN': cn})
         self.assertIssuer(self.ca, cert)
         self.assertAuthorityKeyIdentifier(self.ca, cert)
-        self.assertEqual(cert.subjectAltName(), 'DNS:%s, DNS:%s' % (cn, san))
-        self.assertEqual(cert.basicConstraints(), 'critical,CA:FALSE')
-        self.assertEqual(cert.keyUsage(), '')
-        self.assertEqual(cert.extendedKeyUsage(), '')
+        self.assertEqual(cert.subjectAltName(), (False, ['DNS:%s' % cn, 'DNS:%s' % san]))
+        self.assertEqual(cert.basicConstraints(), (True, 'CA:FALSE'))
+        self.assertEqual(cert.keyUsage(), None)  # not present
+        self.assertEqual(cert.extendedKeyUsage(), None)  # not present
         self.assertEqual(cert.ca, self.ca)
         self.assertEqual(cert.csr, self.csr_pem)
+        self.assertIsNone(cert.TLSFeature())
+
+        # Test that we can view the certificate
+        response = self.client.get(self.change_url(cert.pk))
+        self.assertEqual(response.status_code, 200)
 
     @override_tmpcadir(CA_MIN_KEY_SIZE=1024)
     def test_add_with_password(self):
@@ -288,12 +357,16 @@ class AddTestCase(AdminTestMixin, DjangoCAWithCSRTestCase):
         self.assertSubject(cert.x509, {'C': 'US', 'CN': cn})
         self.assertIssuer(ca, cert)
         self.assertAuthorityKeyIdentifier(ca, cert)
-        self.assertEqual(cert.subjectAltName(), 'DNS:%s' % cn)
-        self.assertEqual(cert.basicConstraints(), 'critical,CA:FALSE')
-        self.assertEqual(cert.keyUsage(), 'critical,digitalSignature,keyAgreement')
-        self.assertEqual(cert.extendedKeyUsage(), 'clientAuth,serverAuth')
+        self.assertEqual(cert.subjectAltName(), (False, ['DNS:%s' % cn]))
+        self.assertEqual(cert.basicConstraints(), (True, 'CA:FALSE'))
+        self.assertEqual(cert.keyUsage(), (True, ['digitalSignature', 'keyAgreement']))
+        self.assertEqual(cert.extendedKeyUsage(), (False, ['clientAuth', 'serverAuth']))
         self.assertEqual(cert.ca, ca)
         self.assertEqual(cert.csr, self.csr_pem)
+
+        # Test that we can view the certificate
+        response = self.client.get(self.change_url(cert.pk))
+        self.assertEqual(response.status_code, 200)
 
     def test_wrong_csr(self):
         cn = 'test-add-wrong-csr.example.com'
@@ -472,8 +545,40 @@ class CSRDetailTestCase(AdminTestMixin, DjangoCAWithCSRTestCase):
         response = self.client.post(self.url, data={'csr': 'foobar'})
         self.assertEqual(response.status_code, 400)
 
-    def test_not_logged_in(self):
+    def test_anonymous(self):
         client = Client()
+
+        response = client.post(self.url, data={'csr': self.csr_pem})
+        self.assertRequiresLogin(response)
+
+    def test_plain_user(self):
+        # User isn't staff and has no permissions
+        client = Client()
+        User.objects.create_user(username='plain', password='password', email='plain@example.com')
+        self.assertTrue(client.login(username='plain', password='password'))
+
+        response = client.post(self.url, data={'csr': self.csr_pem})
+        self.assertRequiresLogin(response)
+
+    def test_no_perms(self):
+        # User is staff but has no permissions
+        client = Client()
+        user = User.objects.create_user(username='staff', password='password', email='staff@example.com')
+        user.is_staff = True  # TODO: Django 1.8 does not allow is_staff as kwarg
+        user.save()
+        self.assertTrue(client.login(username='staff', password='password'))
+
+        response = client.post(self.url, data={'csr': self.csr_pem})
+        self.assertEqual(response.status_code, 403)
+
+    def test_no_staff(self):
+        # User isn't staff but has permissions
+        client = Client()
+        user = User.objects.create_user(username='no_perms', password='password',
+                                        email='no_perms@example.com')
+        p = Permission.objects.get(codename='change_certificate')
+        user.user_permissions.add(p)
+        self.assertTrue(client.login(username='no_perms', password='password'))
 
         response = client.post(self.url, data={'csr': self.csr_pem})
         self.assertRequiresLogin(response)
@@ -513,9 +618,42 @@ class CertDownloadTestCase(AdminTestMixin, DjangoCAWithCertTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.content, b'')
 
-    def test_not_logged_in(self):
+    def test_anonymous(self):
+        # Try an anonymous download
         client = Client()
-        response = client.get(self.url)
+        response = client.get('%s?format=PEM' % self.url)
+        self.assertRequiresLogin(response)
+
+    def test_plain_user(self):
+        # User isn't staff and has no permissions
+        client = Client()
+        User.objects.create_user(username='plain', password='password', email='user@example.com')
+        self.assertTrue(client.login(username='plain', password='password'))
+        response = client.get('%s?format=PEM' % self.url)
+        self.assertRequiresLogin(response)
+
+    def test_no_perms(self):
+        # User is staff but has no permissions
+        client = Client()
+        user = User.objects.create_user(username='no_perms', password='password', email='user@example.com')
+        user.is_staff = True  # TODO: Django 1.8 does not allow is_staff as kwarg
+        user.save()
+        self.assertTrue(client.login(username='no_perms', password='password'))
+
+        response = client.get('%s?format=PEM' % self.url)
+        self.assertEqual(response.status_code, 403)
+
+    def test_no_staff(self):
+        # User isn't staff but has permissions
+        client = Client()
+        response = client.get('%s?format=PEM' % self.url)
+
+        # create a user
+        user = User.objects.create_user(username='no_perms', password='password', email='user@example.com')
+        p = Permission.objects.get(codename='change_certificate')
+        user.user_permissions.add(p)
+        self.assertTrue(client.login(username='no_perms', password='password'))
+
         self.assertRequiresLogin(response)
 
 
@@ -534,19 +672,14 @@ class RevokeCertViewTestCase(AdminTestMixin, DjangoCAWithCertTestCase):
         response = self.client.post(self.url, data={'revoked_reason': ''})
         self.assertRedirects(response, self.change_url())
         self.assertTemplateUsed('django_ca/admin/certificate_revoke_form.html')
-
-        cert = Certificate.objects.get(serial=self.cert.serial)
-        self.assertTrue(cert.revoked)
-        self.assertIsNone(cert.revoked_reason)
+        self.assertRevoked(self.cert)
 
     def test_with_reason(self):
-        response = self.client.post(self.url, data={'revoked_reason': 'certificate_hold'})
+        reason = 'certificate_hold'
+        response = self.client.post(self.url, data={'revoked_reason': reason})
         self.assertRedirects(response, self.change_url())
         self.assertTemplateUsed('django_ca/admin/certificate_revoke_form.html')
-
-        cert = Certificate.objects.get(serial=self.cert.serial)
-        self.assertTrue(cert.revoked)
-        self.assertEqual(cert.revoked_reason, 'certificate_hold')
+        self.assertRevoked(self.cert, reason=reason)
 
     def test_revoked(self):
         cert = Certificate.objects.get(serial=self.cert.serial)
@@ -558,12 +691,9 @@ class RevokeCertViewTestCase(AdminTestMixin, DjangoCAWithCertTestCase):
 
         response = self.client.post(self.url, data={'revoked_reason': 'certificateHold'})
         self.assertEqual(response.status_code, 404)
+        self.assertRevoked(self.cert)
 
-        cert = Certificate.objects.get(serial=self.cert.serial)
-        self.assertTrue(cert.revoked)
-        self.assertIsNone(cert.revoked_reason)
-
-    def test_not_logged_in(self):
+    def test_anonymous(self):
         client = Client()
 
         response = client.get(self.url)
@@ -571,7 +701,49 @@ class RevokeCertViewTestCase(AdminTestMixin, DjangoCAWithCertTestCase):
 
         response = client.post(self.url, data={})
         self.assertRequiresLogin(response)
+        self.assertNotRevoked(self.cert)
 
-        # redirect ok, but not revoked either, right?
-        cert = Certificate.objects.get(serial=self.cert.serial)
-        self.assertFalse(cert.revoked)
+    def test_plain_user(self):
+        # User isn't staff and has no permissions
+        client = Client()
+        User.objects.create_user(username='plain', password='password', email='plain@example.com')
+        self.assertTrue(client.login(username='plain', password='password'))
+
+        response = client.get(self.url)
+        self.assertRequiresLogin(response)
+
+        response = client.post(self.url, data={})
+        self.assertRequiresLogin(response)
+        self.assertNotRevoked(self.cert)
+
+    def test_no_perms(self):
+        # User is staff but has no permissions
+        client = Client()
+        user = User.objects.create_user(username='staff', password='password', email='staff@example.com')
+        user.is_staff = True  # TODO: Django 1.8 does not allow is_staff as kwarg
+        user.save()
+        self.assertTrue(client.login(username='staff', password='password'))
+
+        response = client.get(self.url)
+        self.assertEqual(response.status_code, 403)
+        self.assertNotRevoked(self.cert)
+
+        response = client.post(self.url, data={})
+        self.assertEqual(response.status_code, 403)
+        self.assertNotRevoked(self.cert)
+
+    def test_no_staff(self):
+        # User isn't staff but has permissions
+        client = Client()
+        user = User.objects.create_user(username='no_perms', password='password',
+                                        email='no_perms@example.com')
+        p = Permission.objects.get(codename='change_certificate')
+        user.user_permissions.add(p)
+        self.assertTrue(client.login(username='no_perms', password='password'))
+
+        response = client.get(self.url)
+        self.assertRequiresLogin(response)
+
+        response = client.post(self.url, data={})
+        self.assertRequiresLogin(response)
+        self.assertNotRevoked(self.cert)

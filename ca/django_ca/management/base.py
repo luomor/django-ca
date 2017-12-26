@@ -17,17 +17,20 @@ import argparse
 import getpass
 import os
 import sys
+import textwrap
 from datetime import datetime
 from datetime import timedelta
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.serialization import Encoding
 
+from django.conf import settings
 from django.core.management.base import BaseCommand as _BaseCommand
 from django.core.management.base import OutputWrapper
 from django.core.management.color import no_style
 from django.core.validators import URLValidator
 from django.utils import six
+from django.utils import timezone
 from django.utils.encoding import force_bytes
 
 from django_ca import ca_settings
@@ -154,7 +157,7 @@ class URLAction(argparse.Action):
         validator = URLValidator()
         try:
             validator(value)
-        except:
+        except Exception:
             parser.error('%s: Not a valid URL.' % value)
         setattr(namespace, self.dest, value)
 
@@ -175,6 +178,10 @@ class ExpiresAction(argparse.Action):
         if now is None:
             now = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
 
+        # If USE_TZ is True, we make the object timezone aware, otherwise comparing goes wrong.
+        if settings.USE_TZ:
+            now = timezone.make_aware(now)
+
         return now + timedelta(days=value + 1)
 
     def __call__(self, parser, namespace, value, option_string=None):
@@ -189,7 +196,7 @@ class MultipleURLAction(argparse.Action):
         validator = URLValidator()
         try:
             validator(value)
-        except:
+        except Exception:
             parser.error('%s: Not a valid URL.' % value)
 
         if getattr(namespace, self.dest) is None:
@@ -286,6 +293,32 @@ class BaseCommand(_BaseCommand):
         if help is None:
             help = 'Password used for accessing the private key of the CA.'
         parser.add_argument('-p', '--password', nargs='?', action=PasswordAction, help=help)
+
+    def indent(self, s, prefix='    '):
+        if isinstance(s, list):
+            return ''.join(['%s* %s\n' % (prefix, l) for l in s])
+        elif six.PY3:
+            return textwrap.indent(s, prefix)
+        else:  # pragma: no cover
+            # copied from py3.4 version of textwrap.indent
+            def prefixed_lines():
+                for line in s.splitlines(True):
+                    yield prefix + line
+
+            return ''.join(prefixed_lines())
+
+    def print_extension(self, name, value):
+        critical, value = value
+        if critical:
+            self.stdout.write('%s (critical):' % name)
+        else:
+            self.stdout.write('%s:' % name)
+
+        self.stdout.write(self.indent(value))
+
+    def print_extensions(self, cert):
+        for name, value in sorted(dict(cert.extensions()).items()):
+            self.print_extension(name, value)
 
 
 class CertCommand(BaseCommand):

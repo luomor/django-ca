@@ -13,10 +13,7 @@
 # You should have received a copy of the GNU General Public License along with django-ca.  If not,
 # see <http://www.gnu.org/licenses/>.
 
-import textwrap
-from datetime import datetime
-
-from django.utils import six
+from django.utils import timezone
 
 from django_ca.management.base import CertCommand
 
@@ -36,17 +33,6 @@ class Command(CertCommand):
         self.add_format(parser)
         super(Command, self).add_arguments(parser)
 
-    def indent(self, s, prefix='    '):
-        if six.PY3:
-            return textwrap.indent(s, prefix)
-        else:  # pragma: no cover
-            # copied from py3.4 version of textwrap.indent
-            def prefixed_lines():
-                for line in s.splitlines(True):
-                    yield prefix + line
-
-            return ''.join(prefixed_lines())
-
     def handle(self, cert, **options):
         self.stdout.write('Common Name: %s' % cert.cn)
 
@@ -57,20 +43,18 @@ class Command(CertCommand):
         # self.stdout.write status
         if cert.revoked:
             self.stdout.write('Status: Revoked')
-        elif cert.expires < datetime.utcnow():
+        elif cert.expires < timezone.now():
             self.stdout.write('Status: Expired')
         else:
             self.stdout.write('Status: Valid')
 
         # self.stdout.write extensions
         if options['extensions']:
-            for name, value in cert.extensions():
-                self.stdout.write('%s:' % name)
-                self.stdout.write(self.indent(value))
+            self.print_extensions(cert)
         else:
             san = cert.subjectAltName()
             if san:
-                self.stdout.write('subjectAltName:\n    %s' % san)
+                self.print_extension('subjectAltName', san)
 
         self.stdout.write('Watchers:')
         for watcher in cert.watchers.all():

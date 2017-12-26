@@ -26,10 +26,11 @@ from ..models import Certificate
 from ..models import Watcher
 from .base import DjangoCAWithCertTestCase
 from .base import certs
+from .base import override_settings
 from .base import override_tmpcadir
 
-
 # TODO: Use verbatim strings instead of interpolating
+
 
 @override_tmpcadir(CA_MIN_KEY_SIZE=1024, CA_PROFILES={}, CA_DEFAULT_SUBJECT={})
 class ViewCertTestCase(DjangoCAWithCertTestCase):
@@ -50,14 +51,13 @@ class ViewCertTestCase(DjangoCAWithCertTestCase):
         }
 
     def test_basic(self):
-        stdout, stderr = self.cmd('view_cert', self.cert.serial,
-                                  stdout=BytesIO(), stderr=BytesIO())
+        stdout, stderr = self.cmd('view_cert', self.cert.serial, stdout=BytesIO(), stderr=BytesIO())
         self.assertEqual(stdout.decode('utf-8'), '''Common Name: %(cn)s
 Valid from: %(from)s
 Valid until: %(until)s
 Status: %(status)s
 subjectAltName:
-    %(san)s
+    * %(san_0)s
 Watchers:
 Digest:
     md5: %(md5)s
@@ -66,7 +66,7 @@ Digest:
     sha512: %(sha512)s
 HPKP pin: %(hpkp)s
 
-%(pem)s''' % certs['cert1'])
+%(pem)s''' % self.get_cert_context('cert1'))
 
         self.assertEqual(stderr, b'')
 
@@ -78,21 +78,24 @@ Valid from: %(from)s
 Valid until: %(until)s
 Status: %(status)s
 authorityInfoAccess:
-    %(authInfoAccess)s
+    * %(authInfoAccess_0)s
+    * %(authInfoAccess_1)s
 authorityKeyIdentifier:
     %(authKeyIdentifier)s
-basicConstraints:
-    critical,CA:FALSE
+basicConstraints (critical):
+    CA:FALSE
 cRLDistributionPoints:
-    %(crl)s
+    * %(crl_0)s
 extendedKeyUsage:
-    serverAuth
+    * serverAuth
 issuerAltName:
     %(issuerAltName)s
-keyUsage:
-    critical,digitalSignature,keyAgreement,keyEncipherment
+keyUsage (critical):
+    * %(keyUsage_0)s
+    * %(keyUsage_1)s
+    * %(keyUsage_2)s
 subjectAltName:
-    %(san)s
+    * %(san_0)s
 subjectKeyIdentifier:
     %(subjectKeyIdentifier)s
 Watchers:
@@ -102,8 +105,12 @@ Digest:
     sha256: %(sha256)s
     sha512: %(sha512)s
 HPKP pin: %(hpkp)s
-''' % certs['cert1'])
+''' % self.get_cert_context('cert1'))
         self.assertEqual(stderr, b'')
+
+    @override_settings(USE_TZ=True)
+    def test_basic_with_use_tz(self):
+        self.test_basic()
 
     def test_der(self):
         self.maxDiff = None
@@ -114,7 +121,7 @@ Valid from: %(from)s
 Valid until: %(until)s
 Status: %(status)s
 subjectAltName:
-    %(san)s
+    * %(san_0)s
 Watchers:
 Digest:
     md5: %(md5)s
@@ -123,7 +130,7 @@ Digest:
     sha512: %(sha512)s
 HPKP pin: %(hpkp)s
 
-''' % certs['cert1']
+''' % self.get_cert_context('cert1')
         expected = force_bytes(expected) + certs['cert1']['der'] + b'\n'
 
         self.assertEqual(stdout, expected)
@@ -139,7 +146,7 @@ Valid from: %(from)s
 Valid until: %(until)s
 Status: Revoked
 subjectAltName:
-    DNS:%(cn)s
+    * DNS:%(cn)s
 Watchers:
 Digest:
     md5: %(md5)s
@@ -161,7 +168,7 @@ Valid from: %(from)s
 Valid until: %(until)s
 Status: Expired
 subjectAltName:
-    DNS:%(cn)s
+    * DNS:%(cn)s
 Watchers:
 Digest:
     md5: %(md5)s
@@ -171,6 +178,10 @@ Digest:
 HPKP pin: %(hpkp)s
 ''' % certs['cert1'])
         self.assertEqual(stderr, b'')
+
+    @override_settings(USE_TZ=True)
+    def test_expired_with_use_tz(self):
+        self.test_expired()
 
     def test_no_san_with_watchers(self):
         # test a cert with no subjectAltNames but with watchers.

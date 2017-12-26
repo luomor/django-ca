@@ -17,10 +17,9 @@
 import os
 import subprocess
 import sys
-
 from distutils.cmd import Command
-from setuptools import setup
 
+from setuptools import setup
 
 long_description = """django-ca is a tool to manage TLS certificate authorities and easily issue and revoke
 certificates. It is based `cryptography <https://cryptography.io/>`_ and `Django
@@ -44,16 +43,19 @@ Please see https://django-ca.readthedocs.org for more extensive documentation.
 PY2 = sys.version_info[0] == 2
 PY3 = sys.version_info[0] == 3
 _rootdir = os.path.dirname(os.path.realpath(__file__))
+
 install_requires = [
-    'Django>=1.8',
     'asn1crypto>=0.22.0',
-    'cryptography==1.8.1',
+    'cryptography>=2.1',
     'ocspbuilder>=0.10.2',
     'oscrypto>=0.18.0',
 ]
 
 if PY2:
     install_requires.append('ipaddress>=1.0.18')
+    install_requires.append('Django>=1.8,<2.0')
+else:
+    install_requires.append('Django>=1.8')
 
 
 class BaseCommand(Command):
@@ -104,10 +106,33 @@ class CoverageCommand(BaseCommand):
 
         import coverage
 
-        cov = coverage.Coverage(cover_pylib=False, branch=True,
-                                source=['django_ca'],
-                                omit=['*migrations/*', '*/tests/tests*', ]
-                                )
+        cov = coverage.Coverage(cover_pylib=False, branch=True, source=['django_ca'],
+                                omit=['*migrations/*', '*/tests/tests*', ])
+
+        # exclude version-specific code
+        if PY2:
+            cov.exclude('only py3')
+        else:
+            cov.exclude('only py2')
+
+        from django import VERSION
+        django_versions = [(1, 8), (1, 9), (1, 10), (1, 11), (2, 0), (2, 1)]
+        this_version = VERSION[:2]
+
+        for version in django_versions:
+            version_str = '.'.join([str(v) for v in version])
+
+            if version != this_version:
+                cov.exclude(r'(pragma|PRAGMA)[:\s]?\s*only django==%s' % version_str)
+
+            if version > this_version:
+                cov.exclude(r'(pragma|PRAGMA)[:\s]?\s*only django>%s' % version_str)
+                cov.exclude(r'(pragma|PRAGMA)[:\s]?\s*only django>=%s' % version_str)
+
+            if version < this_version:
+                cov.exclude(r'(pragma|PRAGMA)[:\s]?\s*only django<%s' % version_str)
+                cov.exclude(r'(pragma|PRAGMA)[:\s]?\s*only django<=%s' % version_str)
+
         cov.start()
 
         self.run_tests()
@@ -128,6 +153,8 @@ class QualityCommand(Command):
         pass
 
     def run(self):
+        os.environ.setdefault("DJANGO_SETTINGS_MODULE", "ca.test_settings")
+
         print('isort --check-only --diff -rc ca/ fabfile.py setup.py')
         status = subprocess.call(['isort', '--check-only', '--diff', '-rc',
                                   'ca/', 'fabfile.py', 'setup.py'])
@@ -144,6 +171,8 @@ class QualityCommand(Command):
         os.chdir(work_dir)
         print('python -Wd manage.py check')
         status = subprocess.call(['python', '-Wd', 'manage.py', 'check'])
+        if status != 0:
+            sys.exit(status)
 
 
 def find_package_data(dir):
@@ -159,7 +188,7 @@ package_data = find_package_data('static') + find_package_data('templates')
 
 setup(
     name='django-ca',
-    version='1.6.1',
+    version='1.7.0',
     description='A Django app providing a SSL/TLS certificate authority.',
     long_description=long_description,
     author='Mathias Ertl',

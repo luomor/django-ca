@@ -52,9 +52,9 @@ class Command(BaseCommand, CertificateAuthorityDetailMixin):
             '--expires', metavar='DAYS', action=ExpiresAction, default=365 * 10,
             help='CA certificate expires in DAYS days (default: %(default)s).'
         )
-        self.add_ca(parser, '--parent',
-                    help='''Make the CA an intermediate CA of the named CA. By default, this is a
-                    new root CA.''', no_default=True)
+        self.add_ca(
+            parser, '--parent', no_default=True,
+            help='''Make the CA an intermediate CA of the named CA. By default, this is a new root CA.''')
         parser.add_argument('name', help='Human-readable name of the CA')
         self.add_subject(
             parser, help='''The subject of the CA in the format "/key1=value1/key2=value2/...",
@@ -69,9 +69,8 @@ class Command(BaseCommand, CertificateAuthorityDetailMixin):
 
         group = parser.add_argument_group(
             'pathlen attribute',
-            """Maximum number of CAs that can appear below this one. A pathlen of zero (the
-            default) means it can only be used to sign end user certificates and not further
-            CAs.""")
+            """Maximum number of CAs that can appear below this one. A pathlen of zero (the default) means it
+            can only be used to sign end user certificates and not further CAs.""")
         group = group.add_mutually_exclusive_group()
         group.add_argument('--pathlen', default=0, type=int,
                            help='Maximum number of sublevel CAs (default: %(default)s).')
@@ -80,8 +79,8 @@ class Command(BaseCommand, CertificateAuthorityDetailMixin):
 
         group = parser.add_argument_group(
             'X509 v3 certificate extensions for CA',
-            '''Extensions added to the certificate authority itself. These options cannot be
-            changed without creating a new authority.'''
+            '''Extensions added to the certificate authority itself. These options cannot be changed without
+            creating a new authority.'''
         )
         group.add_argument(
             '--ca-crl-url', metavar='URL', action=MultipleURLAction, default=[],
@@ -96,7 +95,7 @@ class Command(BaseCommand, CertificateAuthorityDetailMixin):
         group.add_argument(
             '--name-constraint', default=[], action='append', metavar='CONSTRAINT',
             help='''Name constraints for the certificate, can be given multiple times, e.g.
-                "permitted;email:.example.com" or "excluded;DNS:.com".''')
+                "permitted,email:.example.com" or "excluded,DNS:.com".''')
 
         self.add_ca_args(parser)
 
@@ -104,14 +103,20 @@ class Command(BaseCommand, CertificateAuthorityDetailMixin):
         if not os.path.exists(ca_settings.CA_DIR):  # pragma: no cover
             os.makedirs(ca_settings.CA_DIR)
 
-        # In case of CAs, we silently set the expiry date to that of the parent CA, if the user
-        # specified a number of days that would make the CA expire after the parent CA.
+        # In case of CAs, we silently set the expiry date to that of the parent CA if the user specified a
+        # number of days that would make the CA expire after the parent CA.
         #
-        # The reasoning is simple: When issuing the child CA, the default is automatically after
-        # that of the parent if it wasn't issued on the same day.
+        # The reasoning is simple: When issuing the child CA, the default is automatically after that of the
+        # parent if it wasn't issued on the same day.
         parent = options['parent']
         if parent and options['expires'] > parent.expires:
             options['expires'] = parent.expires
+        if parent and not parent.allows_intermediate_ca:
+            raise CommandError("Parent CA cannot create intermediate CA due to pathlen restrictions.")
+        if not parent and options['ca_crl_url']:
+            raise CommandError("CRLs cannot be used to revoke root CAs.")
+        if not parent and options['ca_ocsp_url']:
+            raise CommandError("OCSP cannot be used to revoke root CAs.")
 
         # filter empty values in the subject
         subject.setdefault('CN', name)

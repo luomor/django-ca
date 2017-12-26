@@ -20,13 +20,19 @@ from cryptography.hazmat.primitives.serialization import Encoding
 
 from django.conf.urls import url
 from django.core.cache import cache
-from django.core.urlresolvers import reverse
 from django.test import Client
 
 from ..models import Certificate
 from ..views import CertificateRevocationListView
 from .base import DjangoCAWithCertTestCase
+from .base import override_settings
 from .base import override_tmpcadir
+
+try:
+    from django.urls import reverse
+except ImportError:  # Django 1.8 import
+    from django.core.urlresolvers import reverse
+
 
 urlpatterns = [
     url(r'^crl/(?P<serial>[0-9A-F:]+)/$', CertificateRevocationListView.as_view(),
@@ -39,6 +45,9 @@ urlpatterns = [
             type=Encoding.PEM,
         ),
         name='advanced'),
+    url(r'^crl/ca/(?P<serial>[0-9A-F:]+)/$', CertificateRevocationListView.as_view(
+        ca_crl=True, type=Encoding.PEM
+    ), name='ca_crl'),
 ]
 
 
@@ -48,6 +57,9 @@ class GenericCRLViewTests(DjangoCAWithCertTestCase):
     def setUp(self):
         self.client = Client()
         super(GenericCRLViewTests, self).setUp()
+
+    def tearDown(self):
+        cache.clear()
 
     def test_basic(self):
         # test the default view
@@ -81,6 +93,41 @@ class GenericCRLViewTests(DjangoCAWithCertTestCase):
         self.assertEqual(len(list(crl)), 1)
         self.assertEqual(crl[0].serial_number, cert.x509.serial)
 
+    @override_settings(USE_TZ=True)
+    def test_basic_with_use_tz(self):
+        self.test_basic()
+
+    def test_ca_crl(self):
+        child = self.create_ca(name='child', parent=self.ca)
+
+        response = self.client.get(reverse('ca_crl', kwargs={'serial': self.ca.serial}))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response['Content-Type'], 'text/plain')
+        crl = x509.load_pem_x509_crl(response.content, default_backend())
+        self.assertIsInstance(crl.signature_hash_algorithm, hashes.SHA512)
+        self.assertEqual(list(crl), [])
+
+        child.revoke()
+        child.save()
+
+        # fetch again - we should see a cached response
+        response = self.client.get(reverse('ca_crl', kwargs={'serial': self.ca.serial}))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response['Content-Type'], 'text/plain')
+        crl = x509.load_pem_x509_crl(response.content, default_backend())
+        self.assertIsInstance(crl.signature_hash_algorithm, hashes.SHA512)
+        self.assertEqual(len(list(crl)), 0)
+
+        # clear the cache and fetch again
+        cache.clear()
+        response = self.client.get(reverse('ca_crl', kwargs={'serial': self.ca.serial}))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response['Content-Type'], 'text/plain')
+        crl = x509.load_pem_x509_crl(response.content, default_backend())
+        self.assertIsInstance(crl.signature_hash_algorithm, hashes.SHA512)
+        self.assertEqual(len(list(crl)), 1)
+        self.assertEqual(crl[0].serial_number, child.x509.serial)
+
     def test_overwrite(self):
         response = self.client.get(reverse('advanced', kwargs={'serial': self.ca.serial}))
         self.assertEqual(response.status_code, 200)
@@ -91,3 +138,7 @@ class GenericCRLViewTests(DjangoCAWithCertTestCase):
 
         # parse Last/Next Update to see if they match 321 seconds
         self.assertEqual((crl.next_update - crl.last_update).seconds, 321)
+
+    @override_settings(USE_TZ=True)
+    def test_overwrite_with_use_tz(self):
+        self.test_overwrite()

@@ -22,7 +22,6 @@ from cryptography.hazmat.primitives import hashes
 
 from django import forms
 from django.contrib.admin.widgets import AdminDateWidget
-from django.core.urlresolvers import reverse
 from django.utils.translation import ugettext_lazy as _
 
 from . import ca_settings
@@ -33,6 +32,11 @@ from .models import Certificate
 from .utils import EXTENDED_KEY_USAGE_DESC
 from .utils import KEY_USAGE_DESC
 from .widgets import ProfileWidget
+
+try:
+    from django.urls import reverse
+except ImportError:  # pragma: only django<=1.8
+    from django.core.urlresolvers import reverse
 
 
 def _initial_expires():
@@ -125,6 +129,11 @@ class CreateCertificateForm(forms.ModelForm):
             ('timeStamping', 'Trusted Timestamping'),
             ('OCSPSigning', 'OCSP Signing'),
         ))
+    tlsFeature = KeyUsageField(
+        label='TLS Features', choices=(
+            ('OCSPMustStaple', 'OCSP Must-Staple'),
+            ('MultipleCertStatusRequest', 'Multiple Certificate Status Request'),
+        ))
 
     def clean_csr(self):
         data = self.cleaned_data['csr']
@@ -154,6 +163,13 @@ class CreateCertificateForm(forms.ModelForm):
 
     def clean_extendedKeyUsage(self):
         value, critical = self.cleaned_data['extendedKeyUsage']
+        if not value:
+            return None
+        value = ','.join(value)
+        return critical, value
+
+    def clean_tlsFeature(self):
+        value, critical = self.cleaned_data['tlsFeature']
         if not value:
             return None
         value = ','.join(value)

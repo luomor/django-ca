@@ -24,16 +24,18 @@ Features:
 Contents:
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 2
 
    install
    update
    settings
-   cli_interface
+   cli/intro
    web_interface
-   ca_management
    crl
    ocsp
+   extensions
+
+Command-line interface:
 
 Development documentation:
 

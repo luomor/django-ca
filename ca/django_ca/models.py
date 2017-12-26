@@ -19,15 +19,19 @@ import hashlib
 import re
 from collections import OrderedDict
 
+import pytz
+
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.serialization import Encoding
 from cryptography.hazmat.primitives.serialization import PublicFormat
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
+from cryptography.x509 import TLSFeatureType
 from cryptography.x509.oid import AuthorityInformationAccessOID
 from cryptography.x509.oid import ExtensionOID
 
+from django.conf import settings
 from django.db import models
 from django.utils import timezone
 from django.utils.encoding import force_bytes
@@ -42,6 +46,7 @@ from .utils import EXTENDED_KEY_USAGE_REVERSED
 from .utils import KEY_USAGE_MAPPING
 from .utils import OID_NAME_MAPPINGS
 from .utils import add_colons
+from .utils import format_general_name
 from .utils import format_general_names
 from .utils import format_name
 from .utils import int_to_hex
@@ -55,7 +60,7 @@ class Watcher(models.Model):
     @classmethod
     def from_addr(cls, addr):
         name = None
-        match = re.match('(.*?)\s*<(.*)>', addr)
+        match = re.match(r'(.*?)\s*<(.*)>', addr)
         if match is not None:
             name, addr = match.groups()
 
@@ -78,12 +83,34 @@ class Watcher(models.Model):
 
 
 class X509CertMixin(models.Model):
+    # reasons are defined in http://www.ietf.org/rfc/rfc3280.txt
+    REVOCATION_REASONS = (
+        ('', _('No reason')),
+        ('aa_compromise', _('Attribute Authority compromised')),
+        ('affiliation_changed', _('Affiliation changed')),
+        ('ca_compromise', _('CA compromised')),
+        ('certificate_hold', _('On Hold')),
+        ('cessation_of_operation', _('Cessation of operation')),
+        ('key_compromise', _('Key compromised')),
+        ('privilege_withdrawn', _('Privilege withdrawn')),
+        ('remove_from_crl', _('Removed from CRL')),
+        ('superseded', _('Superseded')),
+        ('unspecified', _('Unspecified')),
+    )
+
     created = models.DateTimeField(auto_now=True)
     expires = models.DateTimeField(null=False, blank=False)
 
     pub = models.TextField(verbose_name=_('Public key'))
     cn = models.CharField(max_length=128, verbose_name=_('CommonName'))
     serial = models.CharField(max_length=64, unique=True)
+
+    # revocation information
+    revoked = models.BooleanField(default=False)
+    revoked_date = models.DateTimeField(null=True, blank=True, verbose_name=_('Revoked on'))
+    revoked_reason = models.CharField(
+        max_length=32, null=True, blank=True, verbose_name=_('Reason for revokation'),
+        choices=REVOCATION_REASONS)
 
     _x509 = None
 
@@ -100,6 +127,9 @@ class X509CertMixin(models.Model):
         self.pub = force_str(self.dump_certificate(Encoding.PEM))
         self.cn = self.subject['CN']
         self.expires = self.not_after
+        if settings.USE_TZ:
+            self.expires = timezone.make_aware(self.expires, timezone=pytz.utc)
+
         self.serial = int_to_hex(value.serial_number)
 
     @property
@@ -136,57 +166,47 @@ class X509CertMixin(models.Model):
         try:
             ext = self.x509.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
         except x509.ExtensionNotFound:
-            return ''
+            return None
 
-        value = format_general_names(ext.value)
-        if ext.critical:  # pragma: no cover - not usually critical
-            value = 'critical,%s' % value
-
-        return value
-    subjectAltName.short_description = 'subjectAltName'
+        return ext.critical, [format_general_name(name) for name in ext.value]
 
     def crlDistributionPoints(self):
         try:
-            crldp = self.x509.extensions.get_extension_for_oid(ExtensionOID.CRL_DISTRIBUTION_POINTS)
+            ext = self.x509.extensions.get_extension_for_oid(ExtensionOID.CRL_DISTRIBUTION_POINTS)
         except x509.ExtensionNotFound:
-            return ''
+            return None
 
-        value = ''
-        for dp in crldp.value:
+        value = []
+        for dp in ext.value:
             if dp.full_name:
-                value += 'Full Name: %s\n' % format_general_names(dp.full_name)
+                value.append('Full Name: %s' % format_general_names(dp.full_name))
             else:  # pragma: no cover - not really used in the wild
-                value += 'Relative Name:\n  %s' % format_name(dp.relative_name.value)
+                value.append('Relative Name: %s' % format_name(dp.relative_name.value))
 
-        if crldp.critical:  # pragma: no cover - not usually critical
-            value = 'critical,%s' % value
-
-        return value.strip()
-    crlDistributionPoints.short_description = 'crlDistributionPoints'
+        return ext.critical, value
 
     def authorityInfoAccess(self):
         try:
             ext = self.x509.extensions.get_extension_for_oid(ExtensionOID.AUTHORITY_INFORMATION_ACCESS)
         except x509.ExtensionNotFound:  # pragma: no cover - extension should always be present
-            return ''
+            return None
 
-        output = ''
+        output = []
         for desc in ext.value:
             if desc.access_method == AuthorityInformationAccessOID.OCSP:
-                output += 'OCSP - %s\n' % format_general_names([desc.access_location])
-            elif desc.access_method == AuthorityInformationAccessOID.CA_ISSUERS:  # pragma: no branch
-                output += 'CA Issuers - %s\n' % format_general_names([desc.access_location])
+                output.append('OCSP - %s' % format_general_name(desc.access_location))
+            elif desc.access_method == AuthorityInformationAccessOID.CA_ISSUERS:
+                output.append('CA Issuers - %s' % format_general_name(desc.access_location))
+            else:  # pragma: no cover - nothing else is known currently.
+                output.append('Unknown')
 
-        if ext.critical:  # pragma: no cover - not usually critical
-            output = 'critical,%s' % output
-        return output
-    authorityInfoAccess.short_description = 'authorityInfoAccess'
+        return ext.critical, output
 
     def basicConstraints(self):
         try:
             ext = self.x509.extensions.get_extension_for_oid(ExtensionOID.BASIC_CONSTRAINTS)
         except x509.ExtensionNotFound:  # pragma: no cover - extension should always be present
-            return ''
+            return None
 
         if ext.value.ca is True:
             value = 'CA:TRUE'
@@ -195,17 +215,13 @@ class X509CertMixin(models.Model):
         if ext.value.path_length is not None:
             value = '%s, pathlen:%s' % (value, ext.value.path_length)
 
-        if ext.critical:  # pragma: no branch - should always be critical
-            value = 'critical,%s' % value
-        return value
-    basicConstraints.short_description = 'basicConstraints'
+        return ext.critical, value
 
     def keyUsage(self):
-        value = ''
         try:
             ext = self.x509.extensions.get_extension_for_oid(ExtensionOID.KEY_USAGE)
         except x509.ExtensionNotFound:
-            return value
+            return None
 
         usages = []
         for key, value in KEY_USAGE_MAPPING.items():
@@ -214,67 +230,59 @@ class X509CertMixin(models.Model):
                     usages.append(key)
             except ValueError:
                 pass
-        value = ','.join(sorted(usages))
 
-        if ext.critical:  # pragma: no branch - should always be critical
-            value = 'critical,%s' % value
-        return value
-    keyUsage.short_description = 'keyUsage'
+        return ext.critical, list(sorted(usages))
 
     def extendedKeyUsage(self):
-        value = ''
         try:
             ext = self.x509.extensions.get_extension_for_oid(ExtensionOID.EXTENDED_KEY_USAGE)
         except x509.ExtensionNotFound:
-            return value
+            return None
 
-        usages = []
-        for usage in ext.value:
-            usages.append(EXTENDED_KEY_USAGE_REVERSED[usage])
-        value = ','.join(sorted(usages))
-
-        if ext.critical:  # pragma: no cover - not usually critical
-            value = 'critical,%s' % value
-        return value
-    extendedKeyUsage.short_description = 'extendedKeyUsage'
+        return ext.critical, [EXTENDED_KEY_USAGE_REVERSED[u] for u in ext.value]
 
     def subjectKeyIdentifier(self):
         try:
             ext = self.x509.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_KEY_IDENTIFIER)
         except x509.ExtensionNotFound:  # pragma: no cover - extension should always be present
-            return ''
+            return None
 
         hexlified = binascii.hexlify(ext.value.digest).upper().decode('utf-8')
-        value = add_colons(hexlified)
-        if ext.critical:  # pragma: no cover - not usually critical
-            value = 'critical,%s' % value
-        return value
-    subjectKeyIdentifier.short_description = 'subjectKeyIdentifier'
+        return ext.critical, add_colons(hexlified)
 
     def issuerAltName(self):
         try:
             ext = self.x509.extensions.get_extension_for_oid(ExtensionOID.ISSUER_ALTERNATIVE_NAME)
         except x509.ExtensionNotFound:
-            return ''
+            return None
 
-        value = format_general_names(ext.value)
-        if ext.critical:  # pragma: no cover - not usually critical
-            value = 'critical,%s' % value
-        return value
-    issuerAltName.short_description = 'issuerAltName'
+        return ext.critical, format_general_names(ext.value)
 
     def authorityKeyIdentifier(self):
         try:
             ext = self.x509.extensions.get_extension_for_oid(ExtensionOID.AUTHORITY_KEY_IDENTIFIER)
         except x509.ExtensionNotFound:  # pragma: no cover - extension should always be present
-            return ''
+            return None
 
         hexlified = binascii.hexlify(ext.value.key_identifier).upper().decode('utf-8')
-        value = 'keyid:%s' % add_colons(hexlified)
-        if ext.critical:  # pragma: no cover - not usually critical
-            value = 'critical,%s' % value
-        return value
-    authorityKeyIdentifier.short_description = 'authorityKeyIdentifier'
+        return ext.critical, 'keyid:%s' % add_colons(hexlified)
+
+    def TLSFeature(self):
+        try:
+            ext = self.x509.extensions.get_extension_for_oid(ExtensionOID.TLS_FEATURE)
+        except x509.ExtensionNotFound:
+            return None
+
+        features = []
+        for feature in ext.value:
+            if feature == TLSFeatureType.status_request:
+                features.append('OCSP Must-Staple')
+            elif feature == TLSFeatureType.status_request_v2:
+                features.append('Multiple Certificate Status Request')
+            else:  # pragma: no cover - all features of cryptography 2.1 are covered
+                features.append('Unknown TLS Feature')
+
+        return ext.critical, features
 
     def get_digest(self, algo):
         algo = getattr(hashes, algo.upper())()
@@ -291,104 +299,6 @@ class X509CertMixin(models.Model):
 
     def dump_certificate(self, encoding=Encoding.PEM):
         return self.x509.public_bytes(encoding=encoding)
-
-    class Meta:
-        abstract = True
-
-
-class CertificateAuthority(X509CertMixin):
-    objects = CertificateAuthorityManager.from_queryset(CertificateAuthorityQuerySet)()
-
-    name = models.CharField(max_length=32, help_text=_('A human-readable name'), unique=True)
-    enabled = models.BooleanField(default=True)
-    parent = models.ForeignKey('self', models.SET_NULL, null=True, blank=True, related_name='children')
-    private_key_path = models.CharField(max_length=256, help_text=_('Path to the private key.'))
-
-    # various details used when signing certs
-    crl_url = models.TextField(blank=True, null=True, validators=[multiline_url_validator],
-                               verbose_name=_('CRL URLs'),
-                               help_text=_("URLs, one per line, where you can retrieve the CRL."))
-    issuer_url = models.URLField(blank=True, null=True, verbose_name=_('Issuer URL'),
-                                 help_text=_("URL to the certificate of this CA (in DER format)."))
-    ocsp_url = models.URLField(blank=True, null=True, verbose_name=_('OCSP responder URL'),
-                               help_text=_("URL of a OCSP responser for the CA."))
-    issuer_alt_name = models.URLField(blank=True, null=True, verbose_name=_('issuerAltName'),
-                                      help_text=_("URL for your CA."))
-
-    _key = None
-
-    def key(self, password):
-        if self._key is None:
-            with open(self.private_key_path, 'rb') as f:
-                self._key = load_pem_private_key(f.read(), password, default_backend())
-        return self._key
-
-    @property
-    def pathlen(self):
-        try:
-            ext = self.x509.extensions.get_extension_for_oid(ExtensionOID.BASIC_CONSTRAINTS)
-        except x509.ExtensionNotFound:  # pragma: no cover - extension should always be present
-            return ''
-        return ext.value.path_length
-
-    def nameConstraints(self):
-        try:
-            ext = self.x509.extensions.get_extension_for_oid(ExtensionOID.NAME_CONSTRAINTS)
-        except x509.ExtensionNotFound:
-            return ''
-
-        value = ''
-        if ext.value.permitted_subtrees:  # pragma: no branch
-            value += 'Permitted:\n'
-            for general_name in ext.value.permitted_subtrees:
-                value += '  %s\n' % format_general_names([general_name])
-        if ext.value.excluded_subtrees:  # pragma: no branch
-            value += 'Excluded:\n'
-            for general_name in ext.value.excluded_subtrees:
-                value += '  %s\n' % format_general_names([general_name])
-
-        if ext.critical:  # pragma: no branch - currently always critical
-            value = 'critical,%s' % value
-
-        return value
-    nameConstraints.short_description = 'nameConstraints'
-
-    class Meta:
-        verbose_name = _('Certificate Authority')
-        verbose_name_plural = _('Certificate Authorities')
-
-    def __str__(self):
-        return self.name
-
-
-class Certificate(X509CertMixin):
-    objects = CertificateManager.from_queryset(CertificateQuerySet)()
-
-    # reasons are defined in http://www.ietf.org/rfc/rfc3280.txt
-    REVOCATION_REASONS = (
-        ('', _('No reason')),
-        ('aa_compromise', _('Attribute Authority compromised')),
-        ('affiliation_changed', _('Affiliation changed')),
-        ('ca_compromise', _('CA compromised')),
-        ('certificate_hold', _('On Hold')),
-        ('cessation_of_operation', _('Cessation of operation')),
-        ('key_compromise', _('Key compromised')),
-        ('privilege_withdrawn', _('Privilege withdrawn')),
-        ('remove_from_crl', _('Removed from CRL')),
-        ('superseded', _('Superseded')),
-        ('unspecified', _('Unspecified')),
-    )
-
-    watchers = models.ManyToManyField(Watcher, related_name='certificates', blank=True)
-
-    ca = models.ForeignKey(CertificateAuthority, models.CASCADE, verbose_name=_('Certificate Authority'))
-    csr = models.TextField(verbose_name=_('CSR'), blank=True)
-
-    revoked = models.BooleanField(default=False)
-    revoked_date = models.DateTimeField(null=True, blank=True, verbose_name=_('Revoked on'))
-    revoked_reason = models.CharField(
-        max_length=32, null=True, blank=True, verbose_name=_('Reason for revokation'),
-        choices=REVOCATION_REASONS)
 
     def revoke(self, reason=None):
         self.revoked = True
@@ -418,6 +328,104 @@ class Certificate(X509CertMixin):
             return 'good'
 
         return self.revoked_reason or 'revoked'
+
+    class Meta:
+        abstract = True
+
+
+class CertificateAuthority(X509CertMixin):
+    objects = CertificateAuthorityManager.from_queryset(CertificateAuthorityQuerySet)()
+
+    name = models.CharField(max_length=32, help_text=_('A human-readable name'), unique=True)
+    enabled = models.BooleanField(default=True)
+    # WARNING: on_delete MUST be a keyword argument in Django 1.8.
+    parent = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True,
+                               related_name='children')
+    private_key_path = models.CharField(max_length=256, help_text=_('Path to the private key.'))
+
+    # various details used when signing certs
+    crl_url = models.TextField(blank=True, null=True, validators=[multiline_url_validator],
+                               verbose_name=_('CRL URLs'),
+                               help_text=_("URLs, one per line, where you can retrieve the CRL."))
+    issuer_url = models.URLField(blank=True, null=True, verbose_name=_('Issuer URL'),
+                                 help_text=_("URL to the certificate of this CA (in DER format)."))
+    ocsp_url = models.URLField(blank=True, null=True, verbose_name=_('OCSP responder URL'),
+                               help_text=_("URL of a OCSP responser for the CA."))
+    issuer_alt_name = models.URLField(blank=True, null=True, verbose_name=_('issuerAltName'),
+                                      help_text=_("URL for your CA."))
+
+    _key = None
+
+    def key(self, password):
+        if self._key is None:
+            with open(self.private_key_path, 'rb') as f:
+                self._key = load_pem_private_key(f.read(), password, default_backend())
+        return self._key
+
+    @property
+    def pathlen(self):
+        try:
+            ext = self.x509.extensions.get_extension_for_oid(ExtensionOID.BASIC_CONSTRAINTS)
+        except x509.ExtensionNotFound:  # pragma: no cover - extension should always be present
+            return None
+        return ext.value.path_length
+
+    @property
+    def max_pathlen(self):
+        pathlen = self.pathlen
+        if self.parent is None:
+            return pathlen
+
+        max_parent = self.parent.max_pathlen
+
+        if max_parent is None:
+            return pathlen
+        elif pathlen is None:
+            return max_parent - 1
+        else:
+            return min(self.pathlen, max_parent - 1)
+
+    @property
+    def allows_intermediate_ca(self):
+        """Wether this CA allows creating intermediate CAs."""
+
+        max_pathlen = self.max_pathlen
+        return max_pathlen is None or max_pathlen > 0
+
+    def nameConstraints(self):
+        try:
+            ext = self.x509.extensions.get_extension_for_oid(ExtensionOID.NAME_CONSTRAINTS)
+        except x509.ExtensionNotFound:
+            return None
+
+        value = []
+        if ext.value.permitted_subtrees:
+            for general_name in ext.value.permitted_subtrees:
+                value.append('Permitted: %s' % format_general_name(general_name))
+
+        if ext.value.excluded_subtrees:
+            for general_name in ext.value.excluded_subtrees:
+                value.append('Excluded: %s' % format_general_name(general_name))
+
+        return ext.critical, value
+
+    class Meta:
+        verbose_name = _('Certificate Authority')
+        verbose_name_plural = _('Certificate Authorities')
+
+    def __str__(self):
+        return self.name
+
+
+class Certificate(X509CertMixin):
+    objects = CertificateManager.from_queryset(CertificateQuerySet)()
+
+    watchers = models.ManyToManyField(Watcher, related_name='certificates', blank=True)
+
+    # WARNING: on_delete MUST be a keyword argument in Django 1.8.
+    ca = models.ForeignKey(CertificateAuthority, on_delete=models.CASCADE,
+                           verbose_name=_('Certificate Authority'))
+    csr = models.TextField(verbose_name=_('CSR'), blank=True)
 
     def __str__(self):
         return self.cn

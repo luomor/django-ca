@@ -13,6 +13,7 @@
 # You should have received a copy of the GNU General Public License along with django-ca.  If not,
 # see <http://www.gnu.org/licenses/>.
 
+import copy
 import json
 import os
 from datetime import datetime
@@ -23,9 +24,11 @@ from cryptography.hazmat.primitives.serialization import Encoding
 
 from django.conf.urls import url
 from django.contrib import admin
+from django.core.exceptions import PermissionDenied
 from django.http import Http404
 from django.http import HttpResponse
 from django.http import HttpResponseBadRequest
+from django.utils import six
 from django.utils import timezone
 from django.utils.encoding import force_bytes
 from django.utils.html import mark_safe
@@ -38,10 +41,6 @@ from .models import CertificateAuthority
 from .models import Watcher
 from .utils import OID_NAME_MAPPINGS
 from .views import RevokeCertificateView
-
-_x509_ext_fields = [
-    'keyUsage', 'extendedKeyUsage', 'subjectKeyIdentifier', 'issuerAltName',
-    'authorityKeyIdentifier', 'crlDistributionPoints', 'authorityInfoAccess', ]
 
 
 @admin.register(Watcher)
@@ -72,6 +71,10 @@ on Wikipedia.</p>'''.replace('\n', ' ')
 
     def download_view(self, request, pk):
         """A view that allows the user to download a certificate in PEM or DER/ASN1 format."""
+
+        if not request.user.is_staff or not self.has_change_permission(request):
+            # NOTE: is_staff is already assured by ModelAdmin, but just to be sure
+            raise PermissionDenied
 
         # get object in question
         try:
@@ -107,6 +110,99 @@ on Wikipedia.</p>'''.replace('\n', ' ')
         actions.pop('delete_selected', '')
         return actions
 
+    ##################################
+    # Properties for x509 extensions #
+    ##################################
+
+    def output_extension(self, value):
+        # shared function for formatting extension values
+
+        critical, value = value
+        html = ''
+        if critical is True:
+            text = _('Critical')
+            html = '<img src="/static/admin/img/icon-yes.svg" alt="%s"> %s' % (text, text)
+
+        if isinstance(value, six.string_types):
+            html += '<p>%s</p>' % value
+        else:  # list
+            html += '<ul class="x509-extension-value">'
+            for val in value:
+                html += '<li>%s</li>' % val
+            html += '</ul>'
+
+        return mark_safe(html)
+
+    def basicConstraints(self, obj):
+        return self.output_extension(obj.basicConstraints())
+    basicConstraints.short_description = 'basicConstraints'
+
+    def authorityInfoAccess(self, obj):
+        return self.output_extension(obj.authorityInfoAccess())
+    authorityInfoAccess.short_description = 'authorityInfoAccess'
+
+    def keyUsage(self, obj):
+        return self.output_extension(obj.keyUsage())
+    keyUsage.short_description = 'keyUsage'
+
+    def extendedKeyUsage(self, obj):
+        return self.output_extension(obj.extendedKeyUsage())
+    extendedKeyUsage.short_description = 'extendedKeyUsage'
+
+    def TLSFeature(self, obj):
+        return self.output_extension(obj.TLSFeature())
+    TLSFeature.short_description = _('TLS Feature')
+
+    def subjectKeyIdentifier(self, obj):
+        return self.output_extension(obj.subjectKeyIdentifier())
+    subjectKeyIdentifier.short_description = _('subjectKeyIdentifier')
+
+    def issuerAltName(self, obj):
+        return self.output_extension(obj.issuerAltName())
+    issuerAltName.short_description = _('issuerAltName')
+
+    def authorityKeyIdentifier(self, obj):
+        return self.output_extension(obj.authorityKeyIdentifier())
+    authorityKeyIdentifier.short_description = _('authorityKeyIdentifier')
+
+    def cRLDistributionPoints(self, obj):
+        return self.output_extension(obj.crlDistributionPoints())
+    cRLDistributionPoints.short_description = _('CRL Distribution Points')
+
+    def subjectAltName(self, obj):
+        return self.output_extension(obj.subjectAltName())
+    subjectAltName.short_description = _('subjectAltName')
+
+    def get_fieldsets(self, request, obj=None):
+        fieldsets = super(CertificateMixin, self).get_fieldsets(request, obj=obj)
+
+        if obj is None:
+            return fieldsets
+
+        fieldsets = copy.deepcopy(fieldsets)
+        for name, _value in sorted(obj.extensions()):
+            # TODO: we should handle unknown extensions here
+            fieldsets[self.x509_fieldset_index][1]['fields'].append(name)
+
+        return fieldsets
+
+    def get_readonly_fields(self, request, obj=None):
+        fields = super(CertificateMixin, self).get_readonly_fields(request, obj=obj)
+
+        if obj is None:  # pragma: no cover
+            # This is never True because CertificateAdmin (the only case where objects are added) doesn't call
+            # the superclass in this case.
+            return fields
+
+        return list(fields) + list(dict(obj.extensions()).keys())
+
+    class Media:
+        css = {
+            'all': (
+                'django_ca/admin/css/base.css',
+            ),
+        }
+
 
 @admin.register(CertificateAuthority)
 class CertificateAuthorityAdmin(CertificateMixin, admin.ModelAdmin):
@@ -125,20 +221,14 @@ class CertificateAuthorityAdmin(CertificateMixin, admin.ModelAdmin):
             'classes': ('as-code', ),
         }),
         (_('X509 extensions'), {
-            'fields': [
-                'authorityInfoAccess',
-                'authorityKeyIdentifier',
-                'nameConstraints',
-                'subjectKeyIdentifier',
-            ],
+            'fields': [],  # dynamically added by add_fieldsets
         }),
     )
     list_display = ['enabled', 'name', 'serial', ]
     list_display_links = ['enabled', 'name', ]
     search_fields = ['cn', 'name', 'serial', ]
-    readonly_fields = ['serial', 'pub', 'parent', 'subjectKeyIdentifier', 'issuerAltName',
-                       'authorityKeyIdentifier', 'authorityInfoAccess', 'cn', 'expires',
-                       'hpkp_pin', 'nameConstraints', ]
+    readonly_fields = ['serial', 'pub', 'parent', 'cn', 'expires', 'hpkp_pin', ]
+    x509_fieldset_index = 3
 
     def has_add_permission(self, request):
         return False
@@ -146,8 +236,8 @@ class CertificateAuthorityAdmin(CertificateMixin, admin.ModelAdmin):
     class Media:
         css = {
             'all': (
+                'django_ca/admin/css/base.css',
                 'django_ca/admin/css/certificateauthorityadmin.css',
-                'django_ca/admin/css/monospace.css',
             ),
         }
 
@@ -180,7 +270,7 @@ class CertificateAdmin(CertificateMixin, admin.ModelAdmin):
     list_filter = (StatusListFilter, 'ca')
     readonly_fields = [
         'expires', 'csr', 'pub', 'cn', 'serial', 'revoked', 'revoked_date', 'revoked_reason',
-        'subjectAltName', 'distinguishedName', 'ca', 'hpkp_pin', ] + _x509_ext_fields
+        'distinguishedName', 'ca', 'hpkp_pin', ]
     search_fields = ['cn', 'serial', ]
 
     fieldsets = [
@@ -189,7 +279,7 @@ class CertificateAdmin(CertificateMixin, admin.ModelAdmin):
                        'watchers', 'hpkp_pin'],
         }),
         (_('X509 Extensions'), {
-            'fields': _x509_ext_fields,
+            'fields': [],
             'classes': ('collapse', ),
         }),
         (_('Revocation'), {
@@ -208,9 +298,10 @@ class CertificateAdmin(CertificateMixin, admin.ModelAdmin):
                        'expires', 'watchers', ],
         }),
         (_('X509 Extensions'), {
-            'fields': ['keyUsage', 'extendedKeyUsage', ]
+            'fields': ['keyUsage', 'extendedKeyUsage', 'tlsFeature', ]
         }),
     ]
+    x509_fieldset_index = 1
 
     def has_add_permission(self, request):
         # Only grant add permissions if there is at least one useable CA
@@ -227,6 +318,10 @@ class CertificateAdmin(CertificateMixin, admin.ModelAdmin):
 
     def csr_details_view(self, request):
         """Returns details of a CSR request."""
+
+        if not request.user.is_staff or not self.has_change_permission(request):
+            # NOTE: is_staff is already assured by ModelAdmin, but just to be sure
+            raise PermissionDenied
 
         try:
             csr = x509.load_pem_x509_csr(force_bytes(request.POST['csr']), default_backend())
@@ -272,9 +367,6 @@ class CertificateAdmin(CertificateMixin, admin.ModelAdmin):
 
         if obj.revoked is False:
             fieldsets[2][1]['classes'] = ['collapse', ]
-        else:
-            if 'collapse' in fieldsets[2][1].get('classes', []):
-                fieldsets[2][1]['classes'].remove('collapse')
         return fieldsets
 
     def get_readonly_fields(self, request, obj=None):
@@ -300,7 +392,7 @@ class CertificateAdmin(CertificateMixin, admin.ModelAdmin):
         data = form.cleaned_data
 
         # If this is a new certificate, initialize it.
-        if change is False:  # # pragma: no branch
+        if change is False:
             san, cn_in_san = data['subjectAltName']
             expires = datetime.combine(data['expires'], datetime.min.time())
 
@@ -314,6 +406,7 @@ class CertificateAdmin(CertificateMixin, admin.ModelAdmin):
                 cn_in_san=cn_in_san,
                 keyUsage=data['keyUsage'],
                 extendedKeyUsage=data['extendedKeyUsage'],
+                tls_features=data['tlsFeature'],
                 password=data['password']
             )
         obj.save()
@@ -321,8 +414,8 @@ class CertificateAdmin(CertificateMixin, admin.ModelAdmin):
     class Media:
         css = {
             'all': (
+                'django_ca/admin/css/base.css',
                 'django_ca/admin/css/certificateadmin.css',
-                'django_ca/admin/css/monospace.css',
             ),
         }
         js = (

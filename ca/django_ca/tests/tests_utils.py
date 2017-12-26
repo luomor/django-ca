@@ -5,6 +5,7 @@
 import doctest
 import ipaddress
 import json
+import unittest
 from datetime import datetime
 from datetime import timedelta
 
@@ -31,10 +32,11 @@ from django_ca.utils import is_power2
 from django_ca.utils import multiline_url_validator
 from django_ca.utils import parse_general_name
 from django_ca.utils import parse_name
+from django_ca.utils import validate_email
 
 
 def load_tests(loader, tests, ignore):
-    if six.PY3:
+    if six.PY3:  # pragma: only py3
         # unicode strings make this very hard to test doctests in both py2 and py3
         tests.addTests(doctest.DocTestSuite(utils))
     return tests
@@ -194,6 +196,25 @@ class ParseNameTestCase(DjangoCATestCase):
         self.assertEqual(e.exception.args, ('Unknown x509 name field: %s' % field, ))
 
 
+class ValidateEmailTestCase(DjangoCATestCase):
+    def test_basic(self):
+        self.assertEqual(validate_email('user@example.com'), 'user@example.com')
+
+    def test_i18n(self):
+        self.assertEqual(validate_email('user@exämple.com'), 'user@xn--exmple-cua.com')
+
+    def test_invalid_domain(self):
+        with self.assertRaisesRegex(ValueError, '^Invalid domain: example.com$'):
+            validate_email('user@example com')
+
+    def test_no_at(self):
+        with self.assertRaisesRegex(ValueError, '^Invalid email address: user$'):
+            validate_email('user')
+
+        with self.assertRaisesRegex(ValueError, '^Invalid email address: example.com$'):
+            validate_email('example.com')
+
+
 class ParseGeneralNameTest(DjangoCATestCase):
     # some paths are not covered in doctests
 
@@ -239,7 +260,7 @@ class ParseGeneralNameTest(DjangoCATestCase):
         with self.assertRaisesRegex(IDNAError, msg):
             parse_general_name('user@')
 
-        with self.assertRaisesRegex(IDNAError, '^Empty domain$'):
+        with self.assertRaisesRegex(ValueError, '^Invalid domain: $'):
             parse_general_name('email:user@')
 
     def test_error(self):
@@ -269,6 +290,96 @@ class Power2TestCase(TestCase):
         for i in range(2, 20):
             self.assertFalse(is_power2((2 ** i) - 1))
             self.assertFalse(is_power2((2 ** i) + 1))
+
+
+class AddColonsTestCase(TestCase):
+    def test_basic(self):
+        self.assertEqual(utils.add_colons(''), '')
+        self.assertEqual(utils.add_colons('a'), 'a')
+        self.assertEqual(utils.add_colons('ab'), 'ab')
+        self.assertEqual(utils.add_colons('abc'), 'ab:c')
+        self.assertEqual(utils.add_colons('abcd'), 'ab:cd')
+        self.assertEqual(utils.add_colons('abcde'), 'ab:cd:e')
+        self.assertEqual(utils.add_colons('abcdef'), 'ab:cd:ef')
+        self.assertEqual(utils.add_colons('abcdefg'), 'ab:cd:ef:g')
+
+
+class IntToHexTestCase(TestCase):
+    def test_basic(self):
+        self.assertEqual(utils.int_to_hex(0), '0')
+        self.assertEqual(utils.int_to_hex(1), '1')
+        self.assertEqual(utils.int_to_hex(2), '2')
+        self.assertEqual(utils.int_to_hex(3), '3')
+        self.assertEqual(utils.int_to_hex(4), '4')
+        self.assertEqual(utils.int_to_hex(5), '5')
+        self.assertEqual(utils.int_to_hex(6), '6')
+        self.assertEqual(utils.int_to_hex(7), '7')
+        self.assertEqual(utils.int_to_hex(8), '8')
+        self.assertEqual(utils.int_to_hex(9), '9')
+        self.assertEqual(utils.int_to_hex(10), 'A')
+        self.assertEqual(utils.int_to_hex(11), 'B')
+        self.assertEqual(utils.int_to_hex(12), 'C')
+        self.assertEqual(utils.int_to_hex(13), 'D')
+        self.assertEqual(utils.int_to_hex(14), 'E')
+        self.assertEqual(utils.int_to_hex(15), 'F')
+        self.assertEqual(utils.int_to_hex(16), '10')
+        self.assertEqual(utils.int_to_hex(17), '11')
+        self.assertEqual(utils.int_to_hex(18), '12')
+        self.assertEqual(utils.int_to_hex(19), '13')
+        self.assertEqual(utils.int_to_hex(20), '14')
+        self.assertEqual(utils.int_to_hex(21), '15')
+        self.assertEqual(utils.int_to_hex(22), '16')
+        self.assertEqual(utils.int_to_hex(23), '17')
+        self.assertEqual(utils.int_to_hex(24), '18')
+        self.assertEqual(utils.int_to_hex(25), '19')
+        self.assertEqual(utils.int_to_hex(26), '1A')
+        self.assertEqual(utils.int_to_hex(27), '1B')
+        self.assertEqual(utils.int_to_hex(28), '1C')
+        self.assertEqual(utils.int_to_hex(29), '1D')
+        self.assertEqual(utils.int_to_hex(30), '1E')
+        self.assertEqual(utils.int_to_hex(31), '1F')
+        self.assertEqual(utils.int_to_hex(32), '20')
+        self.assertEqual(utils.int_to_hex(33), '21')
+        self.assertEqual(utils.int_to_hex(34), '22')
+        self.assertEqual(utils.int_to_hex(35), '23')
+        self.assertEqual(utils.int_to_hex(36), '24')
+        self.assertEqual(utils.int_to_hex(37), '25')
+        self.assertEqual(utils.int_to_hex(38), '26')
+        self.assertEqual(utils.int_to_hex(39), '27')
+        self.assertEqual(utils.int_to_hex(40), '28')
+        self.assertEqual(utils.int_to_hex(41), '29')
+        self.assertEqual(utils.int_to_hex(42), '2A')
+        self.assertEqual(utils.int_to_hex(43), '2B')
+        self.assertEqual(utils.int_to_hex(44), '2C')
+        self.assertEqual(utils.int_to_hex(45), '2D')
+        self.assertEqual(utils.int_to_hex(46), '2E')
+        self.assertEqual(utils.int_to_hex(47), '2F')
+        self.assertEqual(utils.int_to_hex(48), '30')
+        self.assertEqual(utils.int_to_hex(49), '31')
+
+    def test_high(self):
+        self.assertEqual(utils.int_to_hex(1513282098), '5A:32:DA:32')
+        self.assertEqual(utils.int_to_hex(1513282099), '5A:32:DA:33')
+        self.assertEqual(utils.int_to_hex(1513282100), '5A:32:DA:34')
+        self.assertEqual(utils.int_to_hex(1513282101), '5A:32:DA:35')
+        self.assertEqual(utils.int_to_hex(1513282102), '5A:32:DA:36')
+        self.assertEqual(utils.int_to_hex(1513282103), '5A:32:DA:37')
+        self.assertEqual(utils.int_to_hex(1513282104), '5A:32:DA:38')
+        self.assertEqual(utils.int_to_hex(1513282105), '5A:32:DA:39')
+        self.assertEqual(utils.int_to_hex(1513282106), '5A:32:DA:3A')
+        self.assertEqual(utils.int_to_hex(1513282107), '5A:32:DA:3B')
+        self.assertEqual(utils.int_to_hex(1513282108), '5A:32:DA:3C')
+        self.assertEqual(utils.int_to_hex(1513282109), '5A:32:DA:3D')
+        self.assertEqual(utils.int_to_hex(1513282110), '5A:32:DA:3E')
+        self.assertEqual(utils.int_to_hex(1513282111), '5A:32:DA:3F')
+        self.assertEqual(utils.int_to_hex(1513282112), '5A:32:DA:40')
+        self.assertEqual(utils.int_to_hex(1513282113), '5A:32:DA:41')
+
+    @unittest.skipUnless(six.PY2, 'long is only defined in py2')
+    def test_long(self):
+        self.assertEqual(utils.int_to_hex(long(0)), '0')  # NOQA
+        self.assertEqual(utils.int_to_hex(long(43)), '2B')  # NOQA
+        self.assertEqual(utils.int_to_hex(long(1513282104)), '5A:32:DA:38')  # NOQA
 
 
 class MultilineURLValidatorTestCase(TestCase):

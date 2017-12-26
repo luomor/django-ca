@@ -23,9 +23,7 @@ from oscrypto import asymmetric
 
 from django.conf import settings
 from django.conf.urls import url
-from django.core.exceptions import ImproperlyConfigured
 from django.test import Client
-from django.urls import reverse
 from django.utils.encoding import force_text
 
 from ..models import Certificate
@@ -35,6 +33,11 @@ from .base import DjangoCAWithCertTestCase
 from .base import certs
 from .base import ocsp_pubkey
 from .base import override_settings
+
+try:
+    from django.urls import reverse
+except ImportError:  # Django 1.8 import
+    from django.core.urlresolvers import reverse
 
 
 # openssl ocsp -issuer django_ca/tests/fixtures/root.pem -serial <serial> \
@@ -61,11 +64,18 @@ urlpatterns = [
         expires=1200,
     ), name='post'),
 
-    url(r'^ocsp/(?P<data>[a-zA-Z0-9=+/]+)$', OCSPView.as_view(
+    url(r'^ocsp/cert/(?P<data>[a-zA-Z0-9=+/]+)$', OCSPView.as_view(
         ca=certs['root']['serial'],
         responder_key=settings.OCSP_KEY_PATH,
         responder_cert=settings.OCSP_PEM_PATH,
     ), name='get'),
+
+    url(r'^ocsp/ca/(?P<data>[a-zA-Z0-9=+/]+)$', OCSPView.as_view(
+        ca=certs['root']['serial'],
+        responder_key=settings.OCSP_KEY_PATH,
+        responder_cert=settings.OCSP_PEM_PATH,
+        ca_ocsp=True,
+    ), name='get-ca'),
 
     url(r'^ocsp-unknown/(?P<data>[a-zA-Z0-9=+/]+)$', OCSPView.as_view(
         ca='unknown',
@@ -73,6 +83,19 @@ urlpatterns = [
         responder_cert=settings.OCSP_PEM_PATH,
     ), name='unknown'),
 
+    url(r'^ocsp/false-key/(?P<data>[a-zA-Z0-9=+/]+)$', OCSPView.as_view(
+        ca=certs['root']['serial'],
+        responder_key='/false/foobar',
+        responder_cert=settings.OCSP_PEM_PATH,
+        expires=1200,
+    ), name='false-key'),
+
+    url(r'^ocsp/false-pem/(?P<data>[a-zA-Z0-9=+/]+)$', OCSPView.as_view(
+        ca=certs['root']['serial'],
+        responder_key=settings.OCSP_KEY_PATH,
+        responder_cert='/false/foobar/',
+        expires=1200,
+    ), name='false-pem'),
 ]
 
 
@@ -240,11 +263,19 @@ class OCSPTestGenericView(OCSPViewTestMixin, DjangoCAWithCertTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertOCSP(response, requested=[self.cert], nonce=req1_nonce)
 
+    @override_settings(USE_TZ=True)
+    def test_get_with_use_tz(self):
+        self.test_get()
+
     def test_post(self):
         response = self.client.post(reverse('django_ca:ocsp-post-root'), req1,
                                     content_type='application/ocsp-request')
         self.assertEqual(response.status_code, 200)
         self.assertOCSP(response, requested=[self.cert], nonce=req1_nonce)
+
+    @override_settings(USE_TZ=True)
+    def test_post_with_use_tz(self):
+        self.test_post()
 
 
 @override_settings(ROOT_URLCONF=__name__)
@@ -255,10 +286,18 @@ class OCSPTestView(OCSPViewTestMixin, DjangoCAWithCertTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertOCSP(response, requested=[self.cert], nonce=req1_nonce)
 
+    @override_settings(USE_TZ=True)
+    def test_get_with_use_tz(self):
+        self.test_get()
+
     def test_post(self):
         response = self.client.post(reverse('post'), req1, content_type='application/ocsp-request')
         self.assertEqual(response.status_code, 200)
         self.assertOCSP(response, requested=[self.cert], nonce=req1_nonce, expires=1200)
+
+    @override_settings(USE_TZ=True)
+    def test_post_with_use_tz(self):
+        self.test_post()
 
     def test_no_nonce(self):
         data = base64.b64encode(req1).decode('utf-8')
@@ -281,10 +320,17 @@ class OCSPTestView(OCSPViewTestMixin, DjangoCAWithCertTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertOCSP(response, requested=[self.cert], nonce=req1_nonce, expires=1200)
 
+    def test_ca_ocsp(self):
+        data = base64.b64encode(req1).decode('utf-8')
+        response = self.client.get(reverse('get-ca', kwargs={'data': data}))
+        self.assertEqual(response.status_code, 200)
+        asn1crypto.ocsp.OCSPResponse.load(response.content)
+        #self.assertOCSP(response, requested=[self.cert], nonce=req1_nonce, expires=1200)
+
     def test_bad_ca(self):
         data = base64.b64encode(req1).decode('utf-8')
         response = self.client.get(reverse('unknown', kwargs={'data': data}))
-        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.status_code, 200)
         ocsp_response = asn1crypto.ocsp.OCSPResponse.load(response.content)
         self.assertEqual(ocsp_response['response_status'].native, 'internal_error')
 
@@ -316,20 +362,28 @@ class OCSPTestView(OCSPViewTestMixin, DjangoCAWithCertTestCase):
         ocsp_response = asn1crypto.ocsp.OCSPResponse.load(response.content)
         self.assertEqual(ocsp_response['response_status'].native, 'malformed_request')
 
-    def test_view_parameters(self):
-        with self.assertRaisesRegex(ImproperlyConfigured, '^wrong path: Could not read private key\.$'):
-            OCSPView.as_view(ca=certs['root']['serial'], responder_key='wrong path',
-                             responder_cert=settings.OCSP_PEM_PATH)
+    def test_bad_ca_cert(self):
+        self.ca.pub = 'foobar'
+        self.ca.save()
 
-        with self.assertRaisesRegex(ImproperlyConfigured, '^: Could not read public key\.$'):
-            OCSPView.as_view(ca=certs['root']['serial'], responder_key=settings.OCSP_KEY_PATH,
-                             responder_cert='')
+        data = base64.b64encode(req1).decode('utf-8')
+        response = self.client.get(reverse('get', kwargs={'data': data}))
+        self.assertEqual(response.status_code, 200)
+        ocsp_response = asn1crypto.ocsp.OCSPResponse.load(response.content)
+        self.assertEqual(ocsp_response['response_status'].native, 'internal_error')
 
-        # Try to pass this file as private or public key, which is of course not a valid key
-        with self.assertRaisesRegex(ImproperlyConfigured, '^%s: Could not read private key\.$' % __file__):
-            OCSPView.as_view(ca=certs['root']['serial'], responder_key=__file__,
-                             responder_cert=settings.OCSP_PEM_PATH)
+    def test_bad_responder_key(self):
+        data = base64.b64encode(req1).decode('utf-8')
 
-        with self.assertRaisesRegex(ImproperlyConfigured, '^%s: Could not read public key\.$' % __file__):
-            OCSPView.as_view(ca=certs['root']['serial'], responder_key=settings.OCSP_KEY_PATH,
-                             responder_cert=__file__)
+        response = self.client.get(reverse('false-key', kwargs={'data': data}))
+        self.assertEqual(response.status_code, 200)
+        ocsp_response = asn1crypto.ocsp.OCSPResponse.load(response.content)
+        self.assertEqual(ocsp_response['response_status'].native, 'internal_error')
+
+    def test_bad_responder_pem(self):
+        data = base64.b64encode(req1).decode('utf-8')
+
+        response = self.client.get(reverse('false-pem', kwargs={'data': data}))
+        self.assertEqual(response.status_code, 200)
+        ocsp_response = asn1crypto.ocsp.OCSPResponse.load(response.content)
+        self.assertEqual(ocsp_response['response_status'].native, 'internal_error')

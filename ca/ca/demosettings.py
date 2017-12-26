@@ -162,10 +162,51 @@ LOGGING = {
     }
 }
 
+LOGIN_URL = '/admin/login/'
+# You can also override the default algorithm used to sign certificates:
+#CA_DIGEST_ALGORITHM = 'sha512'
+DEBUG = True
+SECRET_KEY = 'demo random key'
+
+CA_DEFAULT_SUBJECT = {
+    'C': 'AT',
+    'ST': 'Vienna',
+    'L': 'Vienna',
+    'O': 'Example',
+    'OU': 'Example OU',
+}
+
+CA_MIN_KEY_SIZE = 1024
+CA_OCSP_URLS = {
+    'root': {
+        'ca': '79:61:B7:16:E7:BB:B9:8C:D3:B1:9A:93:21:FC:25:02:F4:9F:AC',
+        'responder_key': '/home/mati/git/mati/django-ca/ca/files/root-ocsp.key',
+        'responder_cert': '/home/mati/git/mati/django-ca/ca/files/root-ocsp.pem',
+    },
+    'root-ca': {
+        'ca': '79:61:B7:16:E7:BB:B9:8C:D3:B1:9A:93:21:FC:25:02:F4:9F:AC',
+        'responder_key': '/home/mati/git/mati/django-ca/ca/files/root-ocsp.key',
+        'responder_cert': '/home/mati/git/mati/django-ca/ca/files/root-ocsp.pem',
+        'ca_ocsp': True,
+    },
+    'intermediate': {
+        'ca': '3C:66:73:D2:F5:67:B1:74:B3:67:05:6F:F6:08:E7:3D:78:97:F3:54',
+        'responder_key': '/home/mati/git/mati/django-ca/ca/files/intermediate-ocsp.key',
+        'responder_cert': '/home/mati/git/mati/django-ca/ca/files/intermediate-ocsp.pem',
+    },
+    'intermediate-ca': {
+        'ca': '3C:66:73:D2:F5:67:B1:74:B3:67:05:6F:F6:08:E7:3D:78:97:F3:54',
+        'responder_key': '/home/mati/git/mati/django-ca/ca/files/intermediate-ocsp.key',
+        'responder_cert': '/home/mati/git/mati/django-ca/ca/files/intermediate-ocsp.pem',
+        'ca_ocsp': True,
+    },
+}
+CA_PROVIDE_GENERIC_CRL = True
+
 try:
     try:
-        from .localsettings import *  # NOQA
+        from .localdemosettings import *  # NOQA
     except ImportError:
-        from localsettings import *  # NOQA
+        from localdemosettings import *  # NOQA
 except ImportError:
     pass

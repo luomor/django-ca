@@ -27,6 +27,7 @@ from .. import ca_settings
 from ..models import Certificate
 from ..models import CertificateAuthority
 from .base import DjangoCAWithCertTestCase
+from .base import override_settings
 from .base import override_tmpcadir
 
 
@@ -43,6 +44,10 @@ class DumpCRLTestCase(DjangoCAWithCertTestCase):
         crl = x509.load_pem_x509_crl(stdout, default_backend())
         self.assertIsInstance(crl.signature_hash_algorithm, hashes.SHA512)
         self.assertEqual(list(crl), [])
+
+    @override_settings(USE_TZ=True)
+    def test_basic_with_use_tz(self):
+        self.test_basic()
 
     def test_file(self):
         path = os.path.join(ca_settings.CA_DIR, 'crl-test.crl')
@@ -68,14 +73,14 @@ class DumpCRLTestCase(DjangoCAWithCertTestCase):
         # Giving no password raises a CommandError
         stdin = six.StringIO(self.csr_pem)
         with self.assertRaisesRegex(CommandError, '^Password was not given but private key is encrypted$'):
-            self.cmd('dump_crl', ca=ca, alt=['example.com'], stdin=stdin)
+            self.cmd('dump_crl', ca=ca, stdin=stdin)
 
         # False password
         stdin = six.StringIO(self.csr_pem)
         ca = CertificateAuthority.objects.get(pk=ca.pk)
         stdin = six.StringIO(self.csr_pem)
         with self.assertRaisesRegex(CommandError, '^Bad decrypt\. Incorrect password\?$'):
-            self.cmd('dump_crl', ca=ca, alt=['example.com'], stdin=stdin, password=b'wrong')
+            self.cmd('dump_crl', ca=ca, stdin=stdin, password=b'wrong')
 
         stdout, stderr = self.cmd('dump_crl', ca=ca, stdout=BytesIO(), stderr=BytesIO(), password=password)
         self.assertEqual(stderr, b'')
@@ -119,3 +124,32 @@ class DumpCRLTestCase(DjangoCAWithCertTestCase):
             self.assertEqual(len(list(crl)), 1)
             self.assertEqual(crl[0].serial_number, cert.x509.serial)
             self.assertEqual(crl[0].extensions[0].value.reason.name, reason)
+
+    def test_ca_crl(self):
+        # create a child CA
+        child = self.create_ca(name='Child', parent=self.ca)
+        self.assertNotRevoked(child)
+
+        stdout, stderr = self.cmd('dump_crl', ca=self.ca, ca_crl=True,
+                                  stdout=BytesIO(), stderr=BytesIO())
+        self.assertEqual(stderr, b'')
+
+        crl = x509.load_pem_x509_crl(stdout, default_backend())
+        self.assertIsInstance(crl.signature_hash_algorithm, hashes.SHA512)
+        self.assertEqual(list(crl), [])
+
+        # revoke the CA and see if it's there
+        child.revoke()
+        self.assertRevoked(child)
+        stdout, stderr = self.cmd('dump_crl', ca=self.ca, ca_crl=True, stdout=BytesIO(), stderr=BytesIO())
+        self.assertEqual(stderr, b'')
+
+        crl = x509.load_pem_x509_crl(stdout, default_backend())
+        self.assertIsInstance(crl.signature_hash_algorithm, hashes.SHA512)
+        self.assertEqual(len(list(crl)), 1)
+        self.assertEqual(crl[0].serial_number, child.x509.serial)
+        self.assertEqual(len(crl[0].extensions), 0)
+
+    @override_settings(USE_TZ=True)
+    def test_revoked_with_use_tz(self):
+        self.test_revoked()

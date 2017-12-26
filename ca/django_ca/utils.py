@@ -24,7 +24,9 @@ from ipaddress import ip_address
 from ipaddress import ip_network
 
 import idna
+
 from cryptography import x509
+from cryptography.x509 import TLSFeatureType
 from cryptography.x509.oid import ExtendedKeyUsageOID
 from cryptography.x509.oid import NameOID
 
@@ -64,6 +66,7 @@ SAN_NAME_MAPPINGS = {
     x509.OtherName: 'otherName',
 }
 
+#: Map OID objects to IDs used in subject strings
 OID_NAME_MAPPINGS = {
     NameOID.COUNTRY_NAME: 'C',
     NameOID.STATE_OR_PROVINCE_NAME: 'ST',
@@ -103,6 +106,13 @@ EXTENDED_KEY_USAGE_MAPPING = {
 }
 EXTENDED_KEY_USAGE_REVERSED = {v: k for k, v in EXTENDED_KEY_USAGE_MAPPING.items()}
 
+TLS_FEATURE_MAPPING = {
+    # https://tools.ietf.org/html/rfc6066.html:
+    'OCSPMustStaple': TLSFeatureType.status_request,
+    # https://tools.ietf.org/html/rfc6961.html (not commonly used):
+    'MultipleCertStatusRequest': TLSFeatureType.status_request_v2,
+}
+
 
 class LazyEncoder(DjangoJSONEncoder):
     """Encoder that also encodes strings translated with ugettext_lazy."""
@@ -136,6 +146,23 @@ def format_name(subject):
     return '/%s' % ('/'.join(['%s=%s' % (force_text(k), force_text(v)) for k, v in subject]))
 
 
+def format_general_name(name):
+    """Format a single general name.
+
+    >>> import ipaddress
+    >>> format_general_name(x509.DNSName('example.com'))
+    'DNS:example.com'
+    >>> format_general_name(x509.IPAddress(ipaddress.IPv4Address('127.0.0.1')))
+    'IP:127.0.0.1'
+    """
+
+    if isinstance(name, x509.DirectoryName):
+        value = format_name(name.value)
+    else:
+        value = name.value
+    return '%s:%s' % (SAN_NAME_MAPPINGS[type(name)], value)
+
+
 def format_general_names(names):
     """Format a list of general names.
 
@@ -151,17 +178,7 @@ def format_general_names(names):
     'DNS:example.com, DNS:example.net'
     """
 
-    formatted = []
-
-    for name in names:
-        if isinstance(name, x509.DirectoryName):
-            value = format_name(name.value)
-        else:
-            value = name.value
-
-        formatted.append('%s:%s' % (SAN_NAME_MAPPINGS[type(name)], value))
-
-    return ', '.join(formatted)
+    return ', '.join([format_general_name(n) for n in names])
 
 
 def is_power2(num):
@@ -194,16 +211,20 @@ def add_colons(s):
     >>> add_colons('teststring')
     'te:st:st:ri:ng'
     """
-    return ':'.join(a + b for a, b in zip(s[::2], s[1::2]))
+    return ':'.join([s[i:i + 2] for i in range(0, len(s), 2)])
 
 
 def int_to_hex(i):
     """Create a hex-representation of the given serial.
 
-    >>> int_to_hex(123456789)
-    '75:BC:D1'
+    >>> int_to_hex(12345678)
+    'BC:61:4E'
     """
     s = hex(i)[2:].upper()
+    if six.PY2 is True and isinstance(i, long):  # pragma: only py2  # NOQA
+        # Strip the "L" suffix, since hex(1L) -> 0x1L.
+        # NOTE: Do not convert to int earlier. int(<very-large-long>) is still long
+        s = s[:-1]
     return add_colons(s)
 
 
@@ -291,21 +312,48 @@ def x509_name(name):
     return x509.Name([x509.NameAttribute(NAME_OID_MAPPINGS[typ], force_text(value)) for typ, value in name])
 
 
+def validate_email(addr):
+    """Validate an email address.
+
+    This function raises ``ValueError`` if the email address is not valid.
+
+    >>> validate_email('foo@bar.com')
+    'foo@bar.com'
+    >>> validate_email('foo@bar com')
+    Traceback (most recent call last):
+        ...
+    ValueError: Invalid domain: bar com
+
+    """
+    if '@' not in addr:
+        raise ValueError('Invalid email address: %s' % addr)
+
+    node, domain = addr.split('@', 1)
+    try:
+        domain = idna.encode(force_text(domain))
+    except idna.core.IDNAError:
+        raise ValueError('Invalid domain: %s' % domain)
+
+    return '%s@%s' % (node, force_text(domain))
+
+
 def parse_general_name(name):
     """Parse a general name from user input.
 
     This function will do its best to detect the intended type of any value passed to it:
 
     >>> parse_general_name('example.com')
-    <DNSName(value=example.com)>
+    <DNSName(value='example.com')>
     >>> parse_general_name('*.example.com')
-    <DNSName(value=*.example.com)>
+    <DNSName(value='*.example.com')>
     >>> parse_general_name('user@example.com')
-    <RFC822Name(value=user@example.com)>
+    <RFC822Name(value='user@example.com')>
     >>> parse_general_name('https://example.com')
-    <UniformResourceIdentifier(value=https://example.com)>
+    <UniformResourceIdentifier(value='https://example.com')>
     >>> parse_general_name('1.2.3.4')
     <IPAddress(value=1.2.3.4)>
+    >>> parse_general_name('fd00::1')
+    <IPAddress(value=fd00::1)>
     >>> parse_general_name('/CN=example.com')  # doctest: +NORMALIZE_WHITESPACE
     <DirectoryName(value=<Name([<NameAttribute(oid=<ObjectIdentifier(oid=2.5.4.3, name=commonName)>,
                                                value='example.com')>])>)>
@@ -325,9 +373,9 @@ def parse_general_name(name):
     If you want to override detection, you can prefix the name to match :py:const:`GENERAL_NAME_RE`:
 
     >>> parse_general_name('email:user@example.com')
-    <RFC822Name(value=user@example.com)>
+    <RFC822Name(value='user@example.com')>
     >>> parse_general_name('URI:https://example.com')
-    <UniformResourceIdentifier(value=https://example.com)>
+    <UniformResourceIdentifier(value='https://example.com')>
     >>> parse_general_name('dirname:/CN=example.com')  # doctest: +NORMALIZE_WHITESPACE
     <DirectoryName(value=<Name([<NameAttribute(oid=<ObjectIdentifier(oid=2.5.4.3, name=commonName)>,
                                                value='example.com')>])>)>
@@ -342,10 +390,10 @@ def parse_general_name(name):
     If you give a prefixed value, this function is less forgiving of any typos and does not catch any
     exceptions:
 
-    >>> parse_general_name('email:foo@')
+    >>> parse_general_name('email:foo@bar com')
     Traceback (most recent call last):
         ...
-    idna.core.IDNAError: Empty domain
+    ValueError: Invalid domain: bar com
 
     """
     name = force_text(name)
@@ -359,13 +407,13 @@ def parse_general_name(name):
         if re.match('[a-z0-9]{2,}://', name):  # Looks like a URI
             try:
                 return x509.UniformResourceIdentifier(name)
-            except:  # pragma: no cover - this really accepts anything
+            except Exception:  # pragma: no cover - this really accepts anything
                 pass
 
         if '@' in name:  # Looks like an Email address
             try:
-                return x509.RFC822Name(name)
-            except:
+                return x509.RFC822Name(validate_email(name))
+            except Exception:
                 pass
 
         if name.strip().startswith('/'):  # maybe it's a dirname?
@@ -394,7 +442,7 @@ def parse_general_name(name):
     if typ == 'uri':
         return x509.UniformResourceIdentifier(name)
     elif typ == 'email':
-        return x509.RFC822Name(name)
+        return x509.RFC822Name(validate_email(name))
     elif typ == 'ip':
         try:
             return x509.IPAddress(ip_address(name))
